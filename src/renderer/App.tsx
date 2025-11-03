@@ -1230,23 +1230,6 @@ const App = () => {
     }
   }, [profiles]);
 
-  // Initialize profile window with a tab if it's a new incognito profile
-  useEffect(() => {
-    const currentProfile = profiles.find(p => p.id === activeProfileId);
-    if (!currentProfile) return;
-
-    // Only auto-create tab if this is an incognito profile and there are no tabs
-    if (currentProfile.isIncognito && tabs.length === 0) {
-      createTab({
-        url: 'incognito.html',
-        title: 'New Incognito Tab',
-        makeActive: true,
-        profileId: activeProfileId,
-        incognito: true,
-      });
-    }
-  }, [activeProfileId, profiles]); // Only run when activeProfileId or profiles change
-
   const refreshAdblockState = useCallback(async () => {
     if (!window.sylph?.adblocker?.getState) return;
     setIsAdblockStateLoading(true);
@@ -2427,7 +2410,13 @@ const App = () => {
     const makeActive = options?.makeActive ?? true;
     const initial = options?.initialState ?? {};
     const hasCustomUrl = Boolean(options?.url ?? initial.url);
-    const url = options?.url ?? initial.url ?? resolvedHomeUrl ?? '';
+
+    // Determine profileId and check if it's incognito
+    const tabProfileId = options?.profileId ?? initial.profileId ?? activeProfileId;
+    const profile = profiles.find(p => p.id === tabProfileId);
+    const isIncognitoProfile = profile?.isIncognito ?? false;
+
+    const url = options?.url ?? initial.url ?? (isIncognitoProfile ? 'incognito.html' : resolvedHomeUrl) ?? '';
     const title =
       options?.title ??
       initial.title ??
@@ -2439,13 +2428,13 @@ const App = () => {
       url,
       title,
       spaceId: options?.spaceId ?? initial.spaceId ?? activeSpaceId,
-      profileId: options?.profileId ?? initial.profileId ?? activeProfileId,
+      profileId: tabProfileId,
       isActive: makeActive,
       isLoading: makeActive && Boolean(url) && !initial.history,
       history,
       favicon: initial.favicon,
       isPinned: initial.isPinned,
-      incognito: options?.incognito ?? initial.incognito,
+      incognito: options?.incognito ?? initial.incognito ?? isIncognitoProfile,
       isMuted: initial.isMuted,
       aiContext: initial.aiContext ? { ...initial.aiContext } : undefined,
     });
@@ -2482,7 +2471,28 @@ const App = () => {
       }
     }
     return nextTab.id;
-  }, [activeSpaceId, getSplitState, homePageUrl, reconcileSplitState, updateSplitState, updateTabsForSpace]);
+  }, [activeSpaceId, activeProfileId, profiles, getSplitState, homePageUrl, reconcileSplitState, updateSplitState, updateTabsForSpace]);
+
+  // Initialize profile window with a tab if it's a new incognito profile
+  const hasInitialized = useRef(false);
+  useEffect(() => {
+    if (hasInitialized.current) return;
+
+    const currentProfile = profiles.find(p => p.id === activeProfileId);
+    if (!currentProfile) return;
+
+    // Only auto-create tab if this is an incognito profile and there are no tabs
+    if (currentProfile.isIncognito && tabs.length === 0) {
+      createTab({
+        url: 'incognito.html',
+        title: 'New Incognito Tab',
+        makeActive: true,
+        profileId: activeProfileId,
+        incognito: true,
+      });
+      hasInitialized.current = true;
+    }
+  }, [activeProfileId, profiles, tabs, createTab]);
 
   const closeTab = useCallback(
     (id: string) => {
