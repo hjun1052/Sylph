@@ -34,6 +34,9 @@ type SylphSettings = {
 
 let settingsWindow: BrowserWindow | null = null;
 
+// Profile window management
+const profileWindows = new Map<string, BrowserWindow>();
+
 type PassGuardOverrideState = {
   tabId: string;
   userAgent: string;
@@ -476,7 +479,7 @@ const configureDefaultSession = () => {
   setupExtensions();
 };
 
-const createWindow = () => {
+const createWindow = (profileId?: string) => {
   const win = new BrowserWindow({
     width: 1200,
     height: 800,
@@ -488,9 +491,32 @@ const createWindow = () => {
     },
   });
 
-  win.loadURL(MAIN_WINDOW_WEBPACK_ENTRY);
+  // Handle webview setup to enable new-window events
+  win.webContents.on('will-attach-webview', (event, webPreferences, params) => {
+    // Enable new-window event for webviews
+    (webPreferences as any).nativeWindowOpen = false;
+    webPreferences.contextIsolation = true;
+    webPreferences.nodeIntegration = false;
+  });
+
+  // Store profile ID if provided
+  if (profileId) {
+    profileWindows.set(profileId, win);
+    win.on('closed', () => {
+      profileWindows.delete(profileId);
+    });
+  }
+
+  // Pass profileId to renderer via query string
+  const url = profileId
+    ? `${MAIN_WINDOW_WEBPACK_ENTRY}?profileId=${encodeURIComponent(profileId)}`
+    : MAIN_WINDOW_WEBPACK_ENTRY;
+
+  win.loadURL(url);
 
   setupWindowContextMenu(win);
+
+  return win;
 };
 
 const ensureSettingsWindow = (parent?: BrowserWindow | null) => {
@@ -803,6 +829,18 @@ ipcMain.handle('open-settings-window', event => {
   ensureSettingsWindow(parent);
 });
 
+ipcMain.handle('open-profile-window', (_event, profileId: string) => {
+  // Check if window already exists for this profile
+  const existingWindow = profileWindows.get(profileId);
+  if (existingWindow && !existingWindow.isDestroyed()) {
+    existingWindow.focus();
+    return;
+  }
+
+  // Create new window for this profile
+  createWindow(profileId);
+});
+
 ipcMain.on('adblocker:subscribe', event => {
   const contents = event.sender;
   adblockSubscribers.add(contents);
@@ -982,6 +1020,7 @@ const requestTabContextMenu = (
   payload: {
     tabId: string;
     isPinned?: boolean;
+    url?: string;
     position: { x: number; y: number };
   },
 ) => {
@@ -1001,6 +1040,17 @@ const requestTabContextMenu = (
     {
       label: 'Duplicate Tab',
       click: () => sendTabAction('duplicate'),
+    },
+    { type: 'separator' },
+    {
+      label: 'Copy Link Address',
+      enabled: !!payload.url,
+      click: () => {
+        if (payload.url) {
+          const { clipboard } = require('electron');
+          clipboard.writeText(payload.url);
+        }
+      },
     },
     { type: 'separator' },
     {

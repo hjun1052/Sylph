@@ -1,0 +1,225 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Incognito - Sylph</title>
+  <style>
+    body {
+      margin: 0;
+      height: 100vh;
+      background: radial-gradient(circle at 50% 40%, #1a1a1a, #000);
+      color: #eee;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      font-family: 'Inter', 'Segoe UI', sans-serif;
+      overflow: hidden;
+    }
+
+    h1 {
+      font-size: 4rem;
+      color: #f5f5f5;
+      margin-bottom: 2rem;
+      letter-spacing: 2px;
+      background: linear-gradient(90deg, #999, #ccc, #999);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+
+    .search-container {
+      position: relative;
+      display: flex;
+      align-items: center;
+      border-radius: 9999px;
+      padding: 0.5rem 1rem;
+      transition: transform 0.2s ease;
+    }
+
+    .search-container::before {
+      content: "";
+      position: absolute;
+      inset: 0;
+      border-radius: 9999px;
+      background: linear-gradient(90deg, #6a0dad, #7b61ff, #ff00cc, #00ffff);
+      filter: blur(25px);
+      z-index: -2;
+      opacity: 0.4;
+      transition: filter 0.3s ease, opacity 0.3s ease, background 0.4s ease;
+    }
+
+    .search-container::after {
+      content: "";
+      position: absolute;
+      inset: 0;
+      border-radius: 9999px;
+      background: rgba(25, 25, 25, 0.7);
+      backdrop-filter: blur(10px);
+      z-index: -1;
+    }
+
+    .bounce {
+      animation: bounce 0.4s ease;
+    }
+
+    @keyframes bounce {
+      0% { transform: scale(1); }
+      40% { transform: scale(1.07); }
+      100% { transform: scale(1); }
+    }
+
+    input {
+      border: none;
+      outline: none;
+      font-size: 1rem;
+      padding: 0.8rem 1rem;
+      width: 400px;
+      border-radius: 9999px;
+      background: transparent;
+      color: #eee;
+    }
+
+    button {
+      border: none;
+      outline: none;
+      background: #444;
+      color: #fff;
+      font-weight: 600;
+      border-radius: 9999px;
+      padding: 0.6rem 1.2rem;
+      cursor: pointer;
+      transition: background 0.2s ease, transform 0.15s ease;
+    }
+
+    button:hover {
+      background: #666;
+      transform: scale(1.05);
+    }
+
+    footer {
+      position: absolute;
+      bottom: 2rem;
+      font-size: 0.85rem;
+      color: #777;
+      letter-spacing: 1px;
+    }
+
+    @media (max-width: 480px) {
+      input { width: 200px; }
+    }
+  </style>
+</head>
+<body>
+  <h1>Sylph Incognito</h1>
+  <form class="search-container" id="searchForm">
+    <input type="text" id="searchInput" placeholder="Search secretly..." />
+    <button type="submit" id="searchButton">Search</button>
+  </form>
+
+  <footer>You're in Incognito mode. Nothing will be saved.</footer>
+
+  <script>
+    let currentEngine = 'search';
+    const engines = {
+      search: {
+        url: 'https://www.google.com/search?udm=50&source=searchlabs&q=',
+        color: 'linear-gradient(90deg, #6a0dad, #7b61ff, #ff00cc, #00ffff)',
+        label: 'Search'
+      },
+      google: {
+        url: 'https://www.google.com/search?q=',
+        color: 'linear-gradient(90deg, #6a0dad, #7b61ff, #ff00cc, #00ffff)',
+        label: 'Google'
+      },
+      bing: {
+        url: 'https://www.bing.com/search?q=',
+        color: 'linear-gradient(90deg, #0078d4, #00aaff, #4facfe, #00f2fe)',
+        label: 'Bing'
+      },
+      duckduckgo: {
+        url: 'https://duckduckgo.com/?q=',
+        color: 'linear-gradient(90deg, #ff8800, #ffaa33, #ffcc66, #ffbb00)',
+        label: 'DuckDuckGo'
+      },
+      chatgpt: {
+        url: 'https://chatgpt.com/?q=',
+        color: 'linear-gradient(90deg, #10a37f, #14b8a6, #2dd4bf, #5eead4)',
+        label: 'ChatGPT'
+      },
+      youtube: {
+        url: 'https://www.youtube.com/results?search_query=',
+        color: 'linear-gradient(90deg, #ff0000, #ff4d4d, #ff6666, #ff8080)',
+        label: 'YouTube'
+      },
+      github: {
+        url: 'https://github.com/search?q=',
+        color: 'linear-gradient(90deg, #333, #555, #777, #999)',
+        label: 'GitHub'
+      },
+      reddit: {
+        url: 'https://www.reddit.com/search/?q=',
+        color: 'linear-gradient(90deg, #ff4500, #ff6b00, #ff8c00, #ffa500)',
+        label: 'Reddit'
+      },
+      stackoverflow: {
+        url: 'https://stackoverflow.com/search?q=',
+        color: 'linear-gradient(90deg, #f48024, #f8a23b, #fbbf24, #ffcd38)',
+        label: 'Stack Overflow'
+      },
+      wikipedia: {
+        url: 'https://en.wikipedia.org/wiki/',
+        color: 'linear-gradient(90deg, #808080, #a0a0a0, #c0c0c0, #dcdcdc)',
+        label: 'Wikipedia'
+      },
+      translate: {
+        url: 'https://translate.google.com/?sl=auto&tl=en&text=',
+        color: 'linear-gradient(90deg, #4285F4, #34A853, #FBBC05, #EA4335)',
+        label: 'Translate'
+      },
+      naver: {
+        url: 'https://search.naver.com/search.naver?query=',
+        color: 'linear-gradient(90deg, #03C75A, #00B14F, #00A14D, #00934A)',
+        label: 'Naver'
+      },
+      perplexity: {
+        url: 'https://www.perplexity.ai/search?q=',
+        color: 'linear-gradient(90deg, #7B61FF, #9C8CFF, #BBAAFF, #DCC8FF)',
+        label: 'Perplexity'
+      },
+      ooai: {
+        url: 'https://oo.ai/search?q=',
+        color: 'linear-gradient(90deg, #FF6EC4, #FF88D1, #FFA3DD, #FFBEEC)',
+        label: 'oo.ai'
+      }
+    };
+
+    const input = document.getElementById('searchInput');
+    const button = document.getElementById('searchButton');
+    const form = document.getElementById('searchForm');
+    const container = document.querySelector('.search-container');
+
+    input.addEventListener('keydown', (e) => {
+      if (e.key === ' ') {
+        const value = input.value.trim().toLowerCase();
+        if (engines[value]) {
+          currentEngine = value;
+          container.classList.add('bounce');
+          document.styleSheets[0].addRule('.search-container::before', `background: ${engines[value].color}`);
+          button.textContent = engines[value].label;
+          input.value = '';
+          setTimeout(() => container.classList.remove('bounce'), 400);
+        }
+      }
+    });
+
+    form.addEventListener('submit', (e) => {
+      e.preventDefault();
+      const query = input.value.trim();
+      if (query) {
+        window.location.href = engines[currentEngine].url + encodeURIComponent(query);
+      }
+    });
+  </script>
+</body>
+</html>

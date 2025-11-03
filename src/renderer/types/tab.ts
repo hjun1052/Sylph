@@ -33,6 +33,7 @@ export interface Tab {
   url: string;                   // 현재 URL
   favicon?: string;             // 파비콘 URL
   spaceId: string;              // 속한 스페이스 ID
+  profileId?: string;           // 프로필 ID (세션 분리)
   isActive: boolean;            // 활성 탭 여부
   isLoading: boolean;           // 웹뷰 로딩 중?
   isCrashed: boolean;           // 웹뷰 크래시 여부

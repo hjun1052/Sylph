@@ -7,6 +7,9 @@ const MAX_AI_PANEL_WIDTH = 520;
 const DEFAULT_AI_PANEL_WIDTH = 340;
 const AI_PANEL_WIDTH_STORAGE_KEY = 'sylph.aiPanel.width';
 const AI_PANEL_COLLAPSED_STORAGE_KEY = 'sylph.aiPanel.collapsed';
+const TABS_STORAGE_KEY = 'sylph.tabs.state';
+const SPACES_STORAGE_KEY = 'sylph.spaces.state';
+const ACTIVE_SPACE_STORAGE_KEY = 'sylph.activeSpace';
 const DEFAULT_SPACE_ID = 'space-default';
 const DEFAULT_SPACE_NAME = 'Space 1';
 const DEFAULT_SPLIT_RATIO = 0.52;
@@ -31,6 +34,9 @@ import type {
 } from 'electron';
 import { v4 as uuidv4 } from 'uuid';
 import { PassGuardUserOverride, Tab, TabAIContext, TabAIMessage, TabPassGuardState } from './types/tab';
+import { HistoryEntry, HistoryDatabase, MAX_HISTORY_ENTRIES, HISTORY_CLEANUP_INTERVAL, HISTORY_STORAGE_KEY } from './types/history';
+import { ArchivedTab, ArchiveSettings, DEFAULT_ARCHIVE_SETTINGS, ARCHIVE_STORAGE_KEY, ARCHIVE_SETTINGS_STORAGE_KEY } from './types/archive';
+import { Profile, DEFAULT_PROFILE_ID, createDefaultProfile, createIncognitoProfile, PROFILES_STORAGE_KEY } from './types/profile';
 import { marked } from 'marked';
 import DOMPurify from 'dompurify';
 import type {
@@ -39,7 +45,7 @@ import type {
   AetherAutomationStep,
   AutomationCommand,
 } from '../shared/aether';
-import { DEFAULT_USER_AGENT, PASS_GUARD_USER_AGENT } from '../shared/network';
+import { DEFAULT_USER_AGENT, PASS_GUARD_USER_AGENT, CHROME_USER_AGENT } from '../shared/network';
 import {
   DEFAULT_PASS_GUARD_SETTINGS,
   PASS_GUARD_SETTINGS_STORAGE_KEY,
@@ -459,7 +465,21 @@ const createStealthInjectionScript = ({
   }
   window.__sylphStealthConfig = CONFIG;
   Object.defineProperty(navigator, 'webdriver', { get: () => undefined, configurable: true });
-  window.chrome = window.chrome || { runtime: {} };
+
+  // Enhanced chrome object for Web Store compatibility
+  if (!window.chrome) {
+    window.chrome = {};
+  }
+  if (!window.chrome.runtime) {
+    window.chrome.runtime = {
+      connect: () => {},
+      sendMessage: () => {},
+      id: undefined,
+      onMessage: { addListener: () => {}, removeListener: () => {} },
+      onConnect: { addListener: () => {}, removeListener: () => {} },
+    };
+  }
+
   Object.defineProperty(navigator, 'languages', {
     get: () => CONFIG.languages.slice(),
     configurable: true,
@@ -480,7 +500,10 @@ const createStealthInjectionScript = ({
     get: () => CONFIG.appVersion,
     configurable: true,
   });
-  if (CONFIG.removeUserAgentData) {
+
+  // Properly fake userAgentData for Chrome Web Store
+  const isChromeUA = CONFIG.userAgent.includes('Chrome/') && !CONFIG.userAgent.includes('Firefox/');
+  if (CONFIG.removeUserAgentData || !isChromeUA) {
     try {
       Object.defineProperty(navigator, 'userAgentData', {
         get: () => undefined,
@@ -488,12 +511,53 @@ const createStealthInjectionScript = ({
       });
     } catch {
       try {
-        // @ts-ignore
         navigator.userAgentData = undefined;
-      } catch {
-        // ignore
-      }
+      } catch {}
     }
+  } else if (isChromeUA) {
+    // Fake Chrome's userAgentData
+    const chromeVersion = CONFIG.userAgent.match(/Chrome\\/([0-9]+)/)?.[1] || '131';
+    const fakeUserAgentData = {
+      brands: [
+        { brand: 'Google Chrome', version: chromeVersion },
+        { brand: 'Chromium', version: chromeVersion },
+        { brand: 'Not.A/Brand', version: '24' },
+      ],
+      mobile: false,
+      platform: CONFIG.platform,
+      getHighEntropyValues: (hints) => Promise.resolve({
+        brands: [
+          { brand: 'Google Chrome', version: chromeVersion },
+          { brand: 'Chromium', version: chromeVersion },
+          { brand: 'Not.A/Brand', version: '24' },
+        ],
+        mobile: false,
+        platform: CONFIG.platform,
+        platformVersion: '10.0.0',
+        architecture: 'x86',
+        bitness: '64',
+        model: '',
+        uaFullVersion: chromeVersion + '.0.0.0',
+        fullVersionList: [
+          { brand: 'Google Chrome', version: chromeVersion + '.0.0.0' },
+          { brand: 'Chromium', version: chromeVersion + '.0.0.0' },
+          { brand: 'Not.A/Brand', version: '24.0.0.0' },
+        ],
+      }),
+      toJSON: function() {
+        return {
+          brands: this.brands,
+          mobile: this.mobile,
+          platform: this.platform,
+        };
+      },
+    };
+    try {
+      Object.defineProperty(navigator, 'userAgentData', {
+        get: () => fakeUserAgentData,
+        configurable: true,
+      });
+    } catch {}
   }
   Object.defineProperty(navigator, 'deviceMemory', { get: () => 8, configurable: true });
   Object.defineProperty(navigator, 'hardwareConcurrency', {
@@ -549,6 +613,8 @@ type CreateTabOptions = {
   initialState?: Partial<Tab>;
   insertIndex?: number;
   spaceId?: string;
+  profileId?: string;
+  incognito?: boolean;
 };
 
 type WebviewNewWindowEvent = Event & {
@@ -573,26 +639,18 @@ type TabSnapshot = {
 };
 
 const resolveFaviconUrl = (favicons: string[], pageUrl: string): string => {
+  // First check if we have a data: URL (always works with CSP)
   for (const icon of favicons) {
     if (!icon) continue;
     const lower = icon.toLowerCase();
     if (lower.startsWith('data:')) return icon;
-    if (lower.startsWith('http://') || lower.startsWith('https://')) return icon;
-    if (lower.startsWith('file://')) return icon;
-    if (lower.startsWith('chrome://favicon/')) {
-      const target = icon.substring('chrome://favicon/'.length);
-      try {
-        const url = new URL(target);
-        return `https://www.google.com/s2/favicons?sz=64&domain_url=${encodeURIComponent(url.href)}`;
-      } catch {
-        // ignore and fall back
-      }
-    }
   }
+
+  // Use Google's favicon service as it's more reliable and CSP-friendly
   try {
     const url = new URL(pageUrl);
     if (url.hostname) {
-      return `https://www.google.com/s2/favicons?sz=64&domain_url=${encodeURIComponent(url.href)}`;
+      return `https://www.google.com/s2/favicons?sz=64&domain=${encodeURIComponent(url.hostname)}`;
     }
   } catch {
     // ignore parse errors
@@ -607,6 +665,16 @@ const extractHostname = (rawUrl: string | undefined | null): string | null => {
     return url.hostname || null;
   } catch {
     return null;
+  }
+};
+
+const isChromeWebStore = (url: string): boolean => {
+  try {
+    const parsed = new URL(url);
+    return parsed.hostname === 'chromewebstore.google.com' ||
+           parsed.hostname === 'chrome.google.com';
+  } catch {
+    return false;
   }
 };
 
@@ -756,33 +824,73 @@ const clampAiPanelWidth = (value: number) =>
 
 const App = () => {
   const [homePageUrl, setHomePageUrl] = useState<string>(DEFAULT_HOME_URL);
-  const [spaces, setSpaces] = useState<Space[]>([
-    {
-      id: DEFAULT_SPACE_ID,
-      name: DEFAULT_SPACE_NAME,
-      color: 'var(--color-green-400)',
-    },
-  ]);
-  const [activeSpaceId, setActiveSpaceId] = useState<string>(DEFAULT_SPACE_ID);
-  const [tabsBySpace, setTabsBySpace] = useState<Record<string, Tab[]>>(() => ({
-    [DEFAULT_SPACE_ID]: [],
-  }));
+  const [spaces, setSpaces] = useState<Space[]>(() => {
+    try {
+      const stored = window.localStorage?.getItem(SPACES_STORAGE_KEY);
+      if (stored) {
+        const parsed = JSON.parse(stored);
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          return parsed;
+        }
+      }
+    } catch (error) {
+      console.warn('Failed to load spaces from storage', error);
+    }
+    return [
+      {
+        id: DEFAULT_SPACE_ID,
+        name: DEFAULT_SPACE_NAME,
+        color: 'var(--color-green-400)',
+      },
+    ];
+  });
+  const [activeSpaceId, setActiveSpaceId] = useState<string>(() => {
+    try {
+      const stored = window.localStorage?.getItem(ACTIVE_SPACE_STORAGE_KEY);
+      if (stored) {
+        return stored;
+      }
+    } catch (error) {
+      console.warn('Failed to load active space from storage', error);
+    }
+    return DEFAULT_SPACE_ID;
+  });
+  const [tabsBySpace, setTabsBySpace] = useState<Record<string, Tab[]>>(() => {
+    try {
+      const stored = window.localStorage?.getItem(TABS_STORAGE_KEY);
+      if (stored) {
+        const parsed = JSON.parse(stored);
+        if (parsed && typeof parsed === 'object') {
+          return parsed;
+        }
+      }
+    } catch (error) {
+      console.warn('Failed to load tabs from storage', error);
+    }
+    return {
+      [DEFAULT_SPACE_ID]: [],
+    };
+  });
   const webviewsRef = useRef<Map<string, WebviewTag>>(new Map());
   const [addressValue, setAddressValue] = useState('');
   const [isAddressFocused, setIsAddressFocused] = useState(false);
+  const [addressSuggestions, setAddressSuggestions] = useState<HistoryEntry[]>([]);
+  const [selectedSuggestionIndex, setSelectedSuggestionIndex] = useState(-1);
   const [composerValue, setComposerValue] = useState('');
   const [isAiSending, setIsAiSending] = useState(false);
   const [composerMode, setComposerMode] = useState<ComposerMode>('auto');
   const [automationBootstrapMessageId, setAutomationBootstrapMessageId] = useState<string | null>(null);
   const [aiPanelWidth, setAiPanelWidth] = useState<number>(DEFAULT_AI_PANEL_WIDTH);
   const [isAiCollapsed, setIsAiCollapsed] = useState(false);
+  const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
+  const [spaceContextMenuId, setSpaceContextMenuId] = useState<string | null>(null);
   const [splitStatesBySpace, setSplitStatesBySpace] = useState<Record<string, SplitState>>({});
   const [spaceMenuTabId, setSpaceMenuTabId] = useState<string | null>(null);
-  const tabs = tabsBySpace[activeSpaceId] ?? [];
-  const allTabs = useMemo(
-    () => Object.values(tabsBySpace).flatMap(spaceTabs => spaceTabs),
-    [tabsBySpace],
-  );
+  const [draggedTabId, setDraggedTabId] = useState<string | null>(null);
+  const [dragOverTabId, setDragOverTabId] = useState<string | null>(null);
+  const [isProfileMenuOpen, setIsProfileMenuOpen] = useState(false);
+  const [isAddProfileModalOpen, setIsAddProfileModalOpen] = useState(false);
+  const [newProfileName, setNewProfileName] = useState('');
 
   const webviewListenersRef = useRef<Map<string, () => void>>(new Map());
   const activeWebviewRef = useRef<WebviewTag | null>(null);
@@ -806,6 +914,91 @@ const App = () => {
   const [adblockError, setAdblockError] = useState<string | null>(null);
   const [isAdblockPickerActive, setIsAdblockPickerActive] = useState(false);
   const [adblockSuccessMessage, setAdblockSuccessMessage] = useState<string | null>(null);
+  const [historyDatabase, setHistoryDatabase] = useState<HistoryDatabase>(() => {
+    try {
+      const stored = window.localStorage?.getItem(HISTORY_STORAGE_KEY);
+      if (stored) {
+        const parsed = JSON.parse(stored);
+        return {
+          entries: new Map(Object.entries(parsed.entries || {})),
+          lastCleanup: parsed.lastCleanup || Date.now(),
+        };
+      }
+    } catch (error) {
+      console.warn('Failed to load history database', error);
+    }
+    return { entries: new Map(), lastCleanup: Date.now() };
+  });
+  const [archivedTabs, setArchivedTabs] = useState<ArchivedTab[]>(() => {
+    try {
+      const stored = window.localStorage?.getItem(ARCHIVE_STORAGE_KEY);
+      if (stored) {
+        const parsed = JSON.parse(stored);
+        if (Array.isArray(parsed)) {
+          return parsed;
+        }
+      }
+    } catch (error) {
+      console.warn('Failed to load archived tabs', error);
+    }
+    return [];
+  });
+  const [archiveSettings, setArchiveSettings] = useState<ArchiveSettings>(() => {
+    try {
+      const stored = window.localStorage?.getItem(ARCHIVE_SETTINGS_STORAGE_KEY);
+      if (stored) {
+        const parsed = JSON.parse(stored);
+        return { ...DEFAULT_ARCHIVE_SETTINGS, ...parsed };
+      }
+    } catch (error) {
+      console.warn('Failed to load archive settings', error);
+    }
+    return DEFAULT_ARCHIVE_SETTINGS;
+  });
+  const [profiles, setProfiles] = useState<Profile[]>(() => {
+    try {
+      const stored = window.localStorage?.getItem(PROFILES_STORAGE_KEY);
+      if (stored) {
+        const parsed = JSON.parse(stored);
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          return parsed;
+        }
+      }
+    } catch (error) {
+      console.warn('Failed to load profiles', error);
+    }
+    return [createDefaultProfile()];
+  });
+
+  // Get profileId from URL query parameter if this window was opened for a specific profile
+  const windowProfileId = useMemo(() => {
+    const params = new URLSearchParams(window.location.search);
+    return params.get('profileId') || DEFAULT_PROFILE_ID;
+  }, []);
+
+  const [activeProfileId, setActiveProfileId] = useState<string>(windowProfileId);
+
+  // Filter tabs by current window's profile
+  const tabs = useMemo(() => {
+    const spaceTabs = tabsBySpace[activeSpaceId] ?? [];
+    return spaceTabs.filter(tab => (tab.profileId || DEFAULT_PROFILE_ID) === activeProfileId);
+  }, [tabsBySpace, activeSpaceId, activeProfileId]);
+
+  const allTabs = useMemo(
+    () => Object.values(tabsBySpace).flatMap(spaceTabs =>
+      spaceTabs.filter(tab => (tab.profileId || DEFAULT_PROFILE_ID) === activeProfileId)
+    ),
+    [tabsBySpace, activeProfileId],
+  );
+
+  // Get active profile (from active tab or default)
+  const activeProfile = useMemo(() => {
+    const activeTab = allTabs.find(tab => tab.isActive);
+    if (activeTab?.profileId) {
+      return profiles.find(p => p.id === activeTab.profileId) || profiles[0];
+    }
+    return profiles.find(p => p.id === activeProfileId) || profiles[0];
+  }, [allTabs, profiles, activeProfileId]);
 
   useEffect(() => {
     const map = new Map<string, Tab>();
@@ -857,6 +1050,117 @@ const App = () => {
     [],
   );
 
+  // History management functions
+  const saveHistoryToStorage = useCallback((db: HistoryDatabase) => {
+    try {
+      const serialized = {
+        entries: Object.fromEntries(db.entries),
+        lastCleanup: db.lastCleanup,
+      };
+      window.localStorage?.setItem(HISTORY_STORAGE_KEY, JSON.stringify(serialized));
+    } catch (error) {
+      console.warn('Failed to save history database', error);
+    }
+  }, []);
+
+  const addToHistory = useCallback((url: string, title: string, favicon?: string, wasTyped = false) => {
+    // Skip about: and data: URLs
+    if (!url || url.startsWith('about:') || url.startsWith('data:')) {
+      return;
+    }
+
+    setHistoryDatabase(prev => {
+      const now = Date.now();
+      const entries = new Map(prev.entries);
+      const existing = entries.get(url);
+
+      if (existing) {
+        // Update existing entry
+        entries.set(url, {
+          ...existing,
+          title,
+          favicon: favicon || existing.favicon,
+          visitCount: existing.visitCount + 1,
+          lastVisitTime: now,
+          typedCount: wasTyped ? existing.typedCount + 1 : existing.typedCount,
+        });
+      } else {
+        // Create new entry
+        entries.set(url, {
+          id: uuidv4(),
+          url,
+          title,
+          favicon,
+          visitCount: 1,
+          lastVisitTime: now,
+          firstVisitTime: now,
+          typedCount: wasTyped ? 1 : 0,
+        });
+      }
+
+      // Cleanup old entries if needed
+      let shouldCleanup = false;
+      if (entries.size > MAX_HISTORY_ENTRIES) {
+        shouldCleanup = true;
+      } else if (now - prev.lastCleanup > HISTORY_CLEANUP_INTERVAL) {
+        shouldCleanup = true;
+      }
+
+      if (shouldCleanup) {
+        // Remove oldest entries if we exceed the limit
+        if (entries.size > MAX_HISTORY_ENTRIES) {
+          const sorted = Array.from(entries.values()).sort((a, b) => a.lastVisitTime - b.lastVisitTime);
+          const toRemove = sorted.slice(0, entries.size - MAX_HISTORY_ENTRIES);
+          toRemove.forEach(entry => entries.delete(entry.url));
+        }
+      }
+
+      const newDb = {
+        entries,
+        lastCleanup: shouldCleanup ? now : prev.lastCleanup,
+      };
+
+      saveHistoryToStorage(newDb);
+      return newDb;
+    });
+  }, [saveHistoryToStorage]);
+
+  const searchHistory = useCallback((query: string, limit = 10): HistoryEntry[] => {
+    const lowerQuery = query.toLowerCase();
+    const results = Array.from(historyDatabase.entries.values())
+      .filter(entry =>
+        entry.url.toLowerCase().includes(lowerQuery) ||
+        entry.title.toLowerCase().includes(lowerQuery)
+      )
+      .sort((a, b) => {
+        // Prioritize typed URLs
+        if (a.typedCount !== b.typedCount) {
+          return b.typedCount - a.typedCount;
+        }
+        // Then by visit count
+        if (a.visitCount !== b.visitCount) {
+          return b.visitCount - a.visitCount;
+        }
+        // Then by last visit time
+        return b.lastVisitTime - a.lastVisitTime;
+      })
+      .slice(0, limit);
+    return results;
+  }, [historyDatabase]);
+
+  // Update address suggestions when address value changes
+  useEffect(() => {
+    if (!isAddressFocused || !addressValue.trim()) {
+      setAddressSuggestions([]);
+      setSelectedSuggestionIndex(-1);
+      return;
+    }
+
+    const suggestions = searchHistory(addressValue, 5);
+    setAddressSuggestions(suggestions);
+    setSelectedSuggestionIndex(-1);
+  }, [addressValue, isAddressFocused, searchHistory]);
+
   useEffect(() => {
     if (!isPassGuardPanelOpen) {
       return;
@@ -871,6 +1175,77 @@ const App = () => {
       window.removeEventListener('keydown', handleKeyDown);
     };
   }, [isPassGuardPanelOpen]);
+
+  // Save tabs state to localStorage whenever it changes
+  useEffect(() => {
+    try {
+      window.localStorage?.setItem(TABS_STORAGE_KEY, JSON.stringify(tabsBySpace));
+    } catch (error) {
+      console.warn('Failed to save tabs to storage', error);
+    }
+  }, [tabsBySpace]);
+
+  // Save spaces to localStorage whenever they change
+  useEffect(() => {
+    try {
+      window.localStorage?.setItem(SPACES_STORAGE_KEY, JSON.stringify(spaces));
+    } catch (error) {
+      console.warn('Failed to save spaces to storage', error);
+    }
+  }, [spaces]);
+
+  // Save active space to localStorage whenever it changes
+  useEffect(() => {
+    try {
+      window.localStorage?.setItem(ACTIVE_SPACE_STORAGE_KEY, activeSpaceId);
+    } catch (error) {
+      console.warn('Failed to save active space to storage', error);
+    }
+  }, [activeSpaceId]);
+
+  // Save archived tabs to localStorage whenever they change
+  useEffect(() => {
+    try {
+      window.localStorage?.setItem(ARCHIVE_STORAGE_KEY, JSON.stringify(archivedTabs));
+    } catch (error) {
+      console.warn('Failed to save archived tabs to storage', error);
+    }
+  }, [archivedTabs]);
+
+  // Save archive settings to localStorage whenever they change
+  useEffect(() => {
+    try {
+      window.localStorage?.setItem(ARCHIVE_SETTINGS_STORAGE_KEY, JSON.stringify(archiveSettings));
+    } catch (error) {
+      console.warn('Failed to save archive settings to storage', error);
+    }
+  }, [archiveSettings]);
+
+  // Save profiles to localStorage whenever they change
+  useEffect(() => {
+    try {
+      window.localStorage?.setItem(PROFILES_STORAGE_KEY, JSON.stringify(profiles));
+    } catch (error) {
+      console.warn('Failed to save profiles to storage', error);
+    }
+  }, [profiles]);
+
+  // Initialize profile window with a tab if it's a new incognito profile
+  useEffect(() => {
+    const currentProfile = profiles.find(p => p.id === activeProfileId);
+    if (!currentProfile) return;
+
+    // Only auto-create tab if this is an incognito profile and there are no tabs
+    if (currentProfile.isIncognito && tabs.length === 0) {
+      createTab({
+        url: 'incognito.html',
+        title: 'New Incognito Tab',
+        makeActive: true,
+        profileId: activeProfileId,
+        incognito: true,
+      });
+    }
+  }, [activeProfileId, profiles]); // Only run when activeProfileId or profiles change
 
   const refreshAdblockState = useCallback(async () => {
     if (!window.sylph?.adblocker?.getState) return;
@@ -956,13 +1331,14 @@ const App = () => {
   const applyPassGuardToTab = useCallback(
     async (tab: Tab) => {
       const state = tab.passGuard ?? createDefaultPassGuardState();
+      const useChromeUA = state.active && isChromeWebStore(tab.url);
       const activeProfile = state.active
         ? {
-            userAgent: passGuardSettings.customUserAgent || PASS_GUARD_USER_AGENT,
+            userAgent: passGuardSettings.customUserAgent || (useChromeUA ? CHROME_USER_AGENT : PASS_GUARD_USER_AGENT),
             platform: passGuardSettings.customPlatform || 'Win32',
-            vendor: passGuardSettings.customVendor || '',
-            productSub: passGuardSettings.customProductSub || '20100101',
-            appVersion: passGuardSettings.customAppVersion || '5.0 (Windows)',
+            vendor: passGuardSettings.customVendor || (useChromeUA ? 'Google Inc.' : ''),
+            productSub: passGuardSettings.customProductSub || (useChromeUA ? '20030107' : '20100101'),
+            appVersion: passGuardSettings.customAppVersion || (useChromeUA ? '5.0 (Windows NT 10.0; Win64; x64)' : '5.0 (Windows)'),
             removeUserAgentData: passGuardSettings.removeUserAgentData,
           }
         : {
@@ -1328,6 +1704,50 @@ const App = () => {
     [spaces],
   );
 
+  const changeSpaceColor = useCallback(
+    (spaceId: string, color: string) => {
+      setSpaces(prev =>
+        prev.map(item => (item.id === spaceId ? { ...item, color } : item)),
+      );
+    },
+    [],
+  );
+
+  const deleteSpace = useCallback(
+    (spaceId: string) => {
+      if (spaceId === DEFAULT_SPACE_ID) {
+        alert('기본 스페이스는 삭제할 수 없습니다.');
+        return;
+      }
+      if (spaces.length <= 1) {
+        alert('최소 하나의 스페이스가 있어야 합니다.');
+        return;
+      }
+      const confirmed = window.confirm('이 스페이스와 모든 탭을 삭제하시겠습니까?');
+      if (!confirmed) return;
+
+      setSpaces(prev => prev.filter(item => item.id !== spaceId));
+      setTabsBySpace(prev => {
+        const next = { ...prev };
+        delete next[spaceId];
+        return next;
+      });
+      setSplitStatesBySpace(prev => {
+        const next = { ...prev };
+        delete next[spaceId];
+        return next;
+      });
+
+      if (activeSpaceId === spaceId) {
+        const remainingSpaces = spaces.filter(s => s.id !== spaceId);
+        if (remainingSpaces.length > 0) {
+          activateSpace(remainingSpaces[0].id);
+        }
+      }
+    },
+    [spaces, activeSpaceId, activateSpace],
+  );
+
   const moveTabToSpace = useCallback(
     (tabId: string, destinationSpaceId: string, makeActive = false) => {
       if (!destinationSpaceId) return;
@@ -1405,6 +1825,25 @@ const App = () => {
       }
     },
     [activateSpace, homePageUrl, reconcileSplitState, reorderTabs],
+  );
+
+  const reorderTabsInSpace = useCallback(
+    (spaceId: string, fromIndex: number, toIndex: number) => {
+      setTabsBySpace(prev => {
+        const spaceTabs = prev[spaceId];
+        if (!spaceTabs || fromIndex === toIndex) return prev;
+
+        const newTabs = [...spaceTabs];
+        const [movedTab] = newTabs.splice(fromIndex, 1);
+        newTabs.splice(toIndex, 0, movedTab);
+
+        return {
+          ...prev,
+          [spaceId]: newTabs,
+        };
+      });
+    },
+    [],
   );
 
   const toggleSplitView = useCallback(() => {
@@ -2000,12 +2439,13 @@ const App = () => {
       url,
       title,
       spaceId: options?.spaceId ?? initial.spaceId ?? activeSpaceId,
+      profileId: options?.profileId ?? initial.profileId ?? activeProfileId,
       isActive: makeActive,
       isLoading: makeActive && Boolean(url) && !initial.history,
       history,
       favicon: initial.favicon,
       isPinned: initial.isPinned,
-      incognito: initial.incognito,
+      incognito: options?.incognito ?? initial.incognito,
       isMuted: initial.isMuted,
       aiContext: initial.aiContext ? { ...initial.aiContext } : undefined,
     });
@@ -2084,6 +2524,131 @@ const App = () => {
     },
     [activeSpaceId, allTabs, homePageUrl, pushClosedTab, reconcileSplitState, updateSplitState, updateTabsForSpace],
   );
+
+  // Profile management functions
+  const createProfile = useCallback((name: string, color: string) => {
+    const newProfile: Profile = {
+      id: `profile-${uuidv4()}`,
+      name,
+      color,
+      partition: `persist:sylph-${uuidv4()}`,
+      isIncognito: false,
+      createdAt: Date.now(),
+    };
+    setProfiles(prev => [...prev, newProfile]);
+    return newProfile;
+  }, []);
+
+  const deleteProfile = useCallback((profileId: string) => {
+    if (profileId === DEFAULT_PROFILE_ID) {
+      console.warn('Cannot delete default profile');
+      return;
+    }
+    setProfiles(prev => prev.filter(p => p.id !== profileId));
+    // Close all tabs using this profile
+    setTabsBySpace(prev => {
+      const next = { ...prev };
+      Object.keys(next).forEach(spaceId => {
+        next[spaceId] = next[spaceId].filter(tab => tab.profileId !== profileId);
+      });
+      return next;
+    });
+  }, []);
+
+  const createIncognitoTab = useCallback(() => {
+    const incognitoProfile = createIncognitoProfile();
+    setProfiles(prev => [...prev, incognitoProfile]);
+
+    // Open incognito profile in new window
+    window.sylph?.openProfileWindow(incognitoProfile.id);
+  }, []);
+
+  // Archive management functions
+  const archiveTab = useCallback((tab: Tab) => {
+    const archived: ArchivedTab = {
+      id: uuidv4(),
+      url: tab.url,
+      title: tab.title,
+      favicon: tab.favicon,
+      spaceId: tab.spaceId,
+      archivedAt: Date.now(),
+      lastAccessedAt: tab.updatedAt,
+    };
+
+    setArchivedTabs(prev => {
+      const updated = [archived, ...prev];
+      // Keep only the most recent maxArchivedTabs
+      if (updated.length > archiveSettings.maxArchivedTabs) {
+        return updated.slice(0, archiveSettings.maxArchivedTabs);
+      }
+      return updated;
+    });
+
+    // Close the tab
+    closeTab(tab.id);
+  }, [archiveSettings.maxArchivedTabs, closeTab]);
+
+  const restoreArchivedTab = useCallback((archivedTab: ArchivedTab) => {
+    // Remove from archived list
+    setArchivedTabs(prev => prev.filter(t => t.id !== archivedTab.id));
+
+    // Create new tab
+    createTab({
+      url: archivedTab.url,
+      title: archivedTab.title,
+      spaceId: archivedTab.spaceId,
+      makeActive: true,
+    });
+  }, [createTab]);
+
+  const clearArchivedTabs = useCallback(() => {
+    setArchivedTabs([]);
+  }, []);
+
+  // Auto-archive inactive tabs
+  useEffect(() => {
+    if (!archiveSettings.enabled) {
+      return;
+    }
+
+    const interval = setInterval(() => {
+      const now = Date.now();
+      const inactiveThreshold = archiveSettings.autoArchiveAfterMinutes * 60 * 1000;
+
+      Object.entries(tabsBySpace).forEach(([, spaceTabs]) => {
+        spaceTabs.forEach(tab => {
+          const timeSinceUpdate = now - tab.updatedAt;
+          const isInactive = timeSinceUpdate > inactiveThreshold;
+          const isNotActive = !tab.isActive;
+          const isNotPinned = !tab.isPinned;
+
+          if (isInactive && isNotActive && isNotPinned) {
+            console.log(`Auto-archiving inactive tab: ${tab.title}`);
+            archiveTab(tab);
+          }
+        });
+      });
+    }, 60000); // Check every minute
+
+    return () => clearInterval(interval);
+  }, [archiveSettings.enabled, archiveSettings.autoArchiveAfterMinutes, tabsBySpace, archiveTab]);
+
+  // Close profile menu on outside click
+  useEffect(() => {
+    if (!isProfileMenuOpen) {
+      return;
+    }
+    const handleClick = (event: MouseEvent) => {
+      const target = event.target as HTMLElement;
+      if (!target.closest('.profile-menu')) {
+        setIsProfileMenuOpen(false);
+      }
+    };
+    window.addEventListener('click', handleClick);
+    return () => {
+      window.removeEventListener('click', handleClick);
+    };
+  }, [isProfileMenuOpen]);
 
   const closeOtherTabs = useCallback(
     (targetId: string) => {
@@ -2247,16 +2812,69 @@ const App = () => {
       updatedAt: Date.now(),
     }));
 
+    // Mark this as a typed URL for better autocomplete ranking
+    addToHistory(normalized, normalized, undefined, true);
+
     addressInputRef.current?.blur();
-  }, [activeTab, addressValue, updateTabById]);
+  }, [activeTab, addressValue, addToHistory, updateTabById]);
 
   const handleAddressKeyDown = (event: ReactKeyboardEvent<HTMLInputElement>) => {
     if (event.key === 'Enter') {
       event.preventDefault();
-      handleNavigate();
+      // If a suggestion is selected, use it
+      if (selectedSuggestionIndex >= 0 && addressSuggestions[selectedSuggestionIndex]) {
+        const suggestion = addressSuggestions[selectedSuggestionIndex];
+        setAddressValue(suggestion.url);
+        setAddressSuggestions([]);
+        setSelectedSuggestionIndex(-1);
+        // Navigate to the selected suggestion
+        if (!activeTab) return;
+        updateTabById(activeTab.id, tab => ({
+          ...tab,
+          url: suggestion.url,
+          title: suggestion.title,
+          isLoading: true,
+          updatedAt: Date.now(),
+        }));
+        addressInputRef.current?.blur();
+      } else {
+        handleNavigate();
+      }
     }
     if (event.key === 'Escape') {
+      setAddressSuggestions([]);
+      setSelectedSuggestionIndex(-1);
       event.currentTarget.blur();
+    }
+    if (event.key === 'Tab' && addressSuggestions.length > 0) {
+      event.preventDefault();
+      // Cycle through suggestions with Tab
+      const nextIndex = (selectedSuggestionIndex + 1) % addressSuggestions.length;
+      setSelectedSuggestionIndex(nextIndex);
+      setAddressValue(addressSuggestions[nextIndex].url);
+    }
+    if (event.key === 'ArrowDown') {
+      event.preventDefault();
+      if (addressSuggestions.length > 0) {
+        const nextIndex = Math.min(selectedSuggestionIndex + 1, addressSuggestions.length - 1);
+        setSelectedSuggestionIndex(nextIndex);
+        if (nextIndex >= 0) {
+          setAddressValue(addressSuggestions[nextIndex].url);
+        }
+      }
+    }
+    if (event.key === 'ArrowUp') {
+      event.preventDefault();
+      if (addressSuggestions.length > 0) {
+        const nextIndex = Math.max(selectedSuggestionIndex - 1, -1);
+        setSelectedSuggestionIndex(nextIndex);
+        if (nextIndex >= 0) {
+          setAddressValue(addressSuggestions[nextIndex].url);
+        } else {
+          // Reset to original input when going back past the first suggestion
+          setAddressValue('');
+        }
+      }
     }
   };
 
@@ -2585,11 +3203,15 @@ const App = () => {
       };
 
       const handleFaviconUpdated = (event: PageFaviconUpdatedEvent) => {
-        const candidate = resolveFaviconUrl(event.favicons ?? [], webview.getURL());
-        updateTabById(tabId, tab => ({
-          ...tab,
-          favicon: candidate,
-        }));
+        const currentUrl = webview.getURL();
+        const candidate = resolveFaviconUrl(event.favicons ?? [], currentUrl);
+        console.log('[Favicon] Updated for', currentUrl, 'icons:', event.favicons, 'resolved:', candidate);
+        if (candidate) {
+          updateTabById(tabId, tab => ({
+            ...tab,
+            favicon: candidate,
+          }));
+        }
       };
 
       const handleDidStartLoading = () => {
@@ -2607,6 +3229,50 @@ const App = () => {
           updatedAt: Date.now(),
         }));
         updateNavigationState();
+
+        // Always try to get favicon after page loads
+        const currentUrl = webview.getURL();
+        const currentTitle = webview.getTitle();
+
+        if (currentUrl && currentUrl.startsWith('http')) {
+          // Use a more reliable method: inject script to get favicon from DOM
+          const faviconScript = `
+            (function() {
+              const links = Array.from(document.querySelectorAll('link[rel*="icon"]'));
+              const favicons = links
+                .map(link => link.href)
+                .filter(href => href && href.length > 0);
+              return favicons;
+            })();
+          `;
+
+          void webview.executeJavaScript(faviconScript, false)
+            .then((favicons: string[]) => {
+              console.log('[Favicon Script] Found icons:', favicons, 'for', currentUrl);
+              const candidate = resolveFaviconUrl(favicons || [], currentUrl);
+              if (candidate) {
+                updateTabById(tabId, tab => ({
+                  ...tab,
+                  favicon: candidate,
+                }));
+              }
+              // Add to browsing history after we have favicon
+              addToHistory(currentUrl, currentTitle, candidate);
+            })
+            .catch(err => {
+              console.warn('[Favicon Script] Failed:', err);
+              // Fallback to direct favicon.ico
+              const fallbackFavicon = resolveFaviconUrl([], currentUrl);
+              if (fallbackFavicon) {
+                updateTabById(tabId, tab => ({
+                  ...tab,
+                  favicon: fallbackFavicon,
+                }));
+              }
+              // Add to browsing history even if favicon failed
+              addToHistory(currentUrl, currentTitle, fallbackFavicon);
+            });
+        }
       };
 
       const handleDidFailLoad = (event: DidFailLoadEvent) => {
@@ -2632,35 +3298,67 @@ const App = () => {
         const currentTab = tabsByIdRef.current.get(tabId);
         if (currentTab) {
           void applyPassGuardToTab(currentTab);
-          return;
         }
-        try {
-          if (typeof webview.setUserAgent === 'function') {
-            webview.setUserAgent(DEFAULT_USER_AGENT);
-          }
-          const script = createStealthInjectionScript({
-            userAgent: DEFAULT_USER_AGENT,
-            platform: 'MacIntel',
-            languages: PASS_GUARD_LANGUAGES,
-            vendor: 'Google Inc.',
-            productSub: '20030107',
-            appVersion: '5.0 (Macintosh; Intel Mac OS X 10_15_7)',
-            removeUserAgentData: false,
-          });
-          void webview
-            .executeJavaScript(script, true)
-            .catch(error => {
-              console.warn('Failed to inject stealth script', error);
+
+        // Inject link click interceptor for target="_blank" links
+        const linkInterceptScript = `
+          (function() {
+            document.addEventListener('click', function(e) {
+              let target = e.target;
+              // Find the closest anchor element
+              while (target && target.tagName !== 'A') {
+                target = target.parentElement;
+              }
+
+              if (target && target.tagName === 'A' && target.href) {
+                const targetAttr = target.getAttribute('target');
+                // Intercept links with target="_blank" or that open in new window
+                if (targetAttr === '_blank' || targetAttr === '_new') {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  // Send message via console to host
+                  console.log('[SYLPH_OPEN_NEW_TAB]', target.href);
+                }
+              }
+            }, true);
+          })();
+        `;
+
+        void webview.executeJavaScript(linkInterceptScript, true).catch(err => {
+          console.warn('Failed to inject link interceptor:', err);
+        });
+
+        if (!currentTab) {
+          try {
+            if (typeof webview.setUserAgent === 'function') {
+              webview.setUserAgent(DEFAULT_USER_AGENT);
+            }
+            const script = createStealthInjectionScript({
+              userAgent: DEFAULT_USER_AGENT,
+              platform: 'MacIntel',
+              languages: PASS_GUARD_LANGUAGES,
+              vendor: 'Google Inc.',
+              productSub: '20030107',
+              appVersion: '5.0 (Macintosh; Intel Mac OS X 10_15_7)',
+              removeUserAgentData: false,
             });
-        } catch (error) {
-          console.warn('Failed to configure stealth settings', error);
+            void webview
+              .executeJavaScript(script, true)
+              .catch(error => {
+                console.warn('Failed to inject stealth script', error);
+              });
+          } catch (error) {
+            console.warn('Failed to configure stealth settings', error);
+          }
         }
       };
 
       const handleNewWindow = (event: WebviewNewWindowEvent) => {
+        console.log('[new-window] Event triggered:', event);
         event.preventDefault();
         const shouldActivate = event.disposition !== 'background-tab';
         const targetUrl = event.url ?? '';
+        console.log('[new-window] Target URL:', targetUrl, 'Disposition:', event.disposition);
         if (!targetUrl) {
           return;
         }
@@ -2669,6 +3367,22 @@ const App = () => {
           title: event.frameName || (targetUrl ? targetUrl : 'New Tab'),
           makeActive: shouldActivate,
         });
+      };
+
+      const handleConsoleMessage = (event: Electron.ConsoleMessageEvent) => {
+        const { message } = event;
+        // Check if this is our special console message
+        if (message.startsWith('[SYLPH_OPEN_NEW_TAB]')) {
+          const url = message.replace('[SYLPH_OPEN_NEW_TAB]', '').trim();
+          if (url) {
+            console.log('[console-message] Creating new tab with URL:', url);
+            createTab({
+              url,
+              title: 'New Tab',
+              makeActive: true,
+            });
+          }
+        }
       };
 
       webview.addEventListener('did-navigate', handleDidNavigate);
@@ -2680,6 +3394,7 @@ const App = () => {
       webview.addEventListener('did-fail-load', handleDidFailLoad);
       webview.addEventListener('dom-ready', handleDomReady);
       webview.addEventListener('new-window', handleNewWindow);
+      webview.addEventListener('console-message', handleConsoleMessage);
 
       return () => {
         webview.removeEventListener('did-navigate', handleDidNavigate);
@@ -2691,9 +3406,10 @@ const App = () => {
         webview.removeEventListener('did-fail-load', handleDidFailLoad);
         webview.removeEventListener('dom-ready', handleDomReady);
         webview.removeEventListener('new-window', handleNewWindow);
+        webview.removeEventListener('console-message', handleConsoleMessage);
       };
     },
-    [applyPassGuardToTab, createTab, passGuardSettings, setAddressValue, updateTabById],
+    [addToHistory, applyPassGuardToTab, createTab, passGuardSettings, setAddressValue, updateTabById],
   );
 
   const handleWebviewRef = useCallback(
@@ -4210,8 +4926,16 @@ const App = () => {
 
   return (
     <div className="app-shell">
-      <aside className="sidebar">
+      <aside className={`sidebar${isSidebarCollapsed ? ' is-collapsed' : ''}`}>
         <div className="sidebar__header">
+          <button
+            className="sidebar__collapse-toggle"
+            onClick={() => setIsSidebarCollapsed(!isSidebarCollapsed)}
+            type="button"
+            title={isSidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+          >
+            {isSidebarCollapsed ? '›' : '‹'}
+          </button>
           <div className="sidebar__brand">Sylph</div>
           <button
             className="sidebar__new-tab"
@@ -4226,26 +4950,87 @@ const App = () => {
           <div className="sidebar__section-label">Spaces</div>
           <div className="sidebar__space-list">
             {spaces.map(space => (
-              <button
-                key={space.id}
-                type="button"
-                className={`sidebar__space ${space.id === activeSpaceId ? 'is-active' : ''}`}
-                onClick={event => {
-                  event.stopPropagation();
-                  activateSpace(space.id);
-                }}
-                onDoubleClick={event => {
-                  event.stopPropagation();
-                  renameSpace(space.id);
-                }}
-              >
-                <span
-                  className="sidebar__space-dot"
-                  style={{ backgroundColor: space.color }}
-                  aria-hidden="true"
-                />
-                <span className="sidebar__space-name">{space.name}</span>
-              </button>
+              <div key={space.id} className="sidebar__space-wrapper">
+                <button
+                  type="button"
+                  className={`sidebar__space ${space.id === activeSpaceId ? 'is-active' : ''}`}
+                  onClick={event => {
+                    event.stopPropagation();
+                    setSpaceContextMenuId(null);
+                    activateSpace(space.id);
+                  }}
+                  onDoubleClick={event => {
+                    event.stopPropagation();
+                    renameSpace(space.id);
+                  }}
+                  onContextMenu={event => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    setSpaceContextMenuId(spaceContextMenuId === space.id ? null : space.id);
+                  }}
+                >
+                  <span
+                    className="sidebar__space-dot"
+                    style={{ backgroundColor: space.color }}
+                    aria-hidden="true"
+                  />
+                  <span className="sidebar__space-name">{space.name}</span>
+                </button>
+                {spaceContextMenuId === space.id && (
+                  <div
+                    className="sidebar__space-menu"
+                    onClick={event => event.stopPropagation()}
+                  >
+                    <button
+                      type="button"
+                      className="sidebar__space-menu-item"
+                      onClick={event => {
+                        event.stopPropagation();
+                        renameSpace(space.id);
+                        setSpaceContextMenuId(null);
+                      }}
+                    >
+                      ✏️ Rename
+                    </button>
+                    <div className="sidebar__space-menu-section">
+                      <div className="sidebar__space-menu-label">Change Color</div>
+                      <div className="sidebar__space-menu-colors">
+                        {SPACE_COLOR_PALETTE.map(color => (
+                          <button
+                            key={color}
+                            type="button"
+                            className="sidebar__space-menu-color"
+                            style={{ backgroundColor: color }}
+                            title={`Change to ${color}`}
+                            aria-label={`Change color to ${color}`}
+                            onClick={event => {
+                              event.stopPropagation();
+                              changeSpaceColor(space.id, color);
+                              setSpaceContextMenuId(null);
+                            }}
+                          />
+                        ))}
+                      </div>
+                    </div>
+                    {space.id !== DEFAULT_SPACE_ID && spaces.length > 1 && (
+                      <>
+                        <div className="sidebar__space-menu-divider" />
+                        <button
+                          type="button"
+                          className="sidebar__space-menu-item sidebar__space-menu-item--danger"
+                          onClick={event => {
+                            event.stopPropagation();
+                            deleteSpace(space.id);
+                            setSpaceContextMenuId(null);
+                          }}
+                        >
+                          🗑️ Delete Space
+                        </button>
+                      </>
+                    )}
+                  </div>
+                )}
+              </div>
             ))}
           </div>
           <button
@@ -4263,7 +5048,7 @@ const App = () => {
         <div className="sidebar__section">
           <div className="sidebar__section-label">Tabs</div>
           <div className="sidebar__tab-list">
-            {tabs.map(tab => {
+            {tabs.map((tab, tabIndex) => {
               const isSplitMember =
                 activeSplit.isSplit &&
                 (activeSplit.primaryTabId === tab.id || activeSplit.secondaryTabId === tab.id);
@@ -4271,12 +5056,15 @@ const App = () => {
                 isSplitMember &&
                 ((activeSplit.focus === 'primary' && activeSplit.primaryTabId === tab.id) ||
                   (activeSplit.focus === 'secondary' && activeSplit.secondaryTabId === tab.id));
+              const isDragging = draggedTabId === tab.id;
+              const isDragOver = dragOverTabId === tab.id;
               return (
                 <div
                   key={tab.id}
                   role="button"
                   tabIndex={0}
-                  className={`sidebar__tab${tab.isActive ? ' is-active' : ''}${isSplitMember ? ' is-split' : ''}${isSplitFocus ? ' is-split-focus' : ''}`}
+                  draggable
+                  className={`sidebar__tab${tab.isActive ? ' is-active' : ''}${isSplitMember ? ' is-split' : ''}${isSplitFocus ? ' is-split-focus' : ''}${isDragging ? ' is-dragging' : ''}${isDragOver ? ' is-drag-over' : ''}`}
                   onClick={() => setActiveTab(tab.id)}
                   onKeyDown={event => {
                     if (event.key === 'Enter' || event.key === ' ') {
@@ -4289,8 +5077,41 @@ const App = () => {
                     window.sylph?.requestTabContextMenu?.({
                       tabId: tab.id,
                       isPinned: tab.isPinned,
+                      url: tab.url,
                       position: { x: event.pageX, y: event.pageY },
                     });
+                  }}
+                  onDragStart={event => {
+                    setDraggedTabId(tab.id);
+                    event.dataTransfer.effectAllowed = 'move';
+                    event.dataTransfer.setData('text/plain', tab.id);
+                  }}
+                  onDragEnd={() => {
+                    setDraggedTabId(null);
+                    setDragOverTabId(null);
+                  }}
+                  onDragOver={event => {
+                    event.preventDefault();
+                    event.dataTransfer.dropEffect = 'move';
+                    if (draggedTabId && draggedTabId !== tab.id) {
+                      setDragOverTabId(tab.id);
+                    }
+                  }}
+                  onDragLeave={() => {
+                    setDragOverTabId(null);
+                  }}
+                  onDrop={event => {
+                    event.preventDefault();
+                    const draggedId = event.dataTransfer.getData('text/plain');
+                    if (draggedId && draggedId !== tab.id) {
+                      const fromIndex = tabs.findIndex(t => t.id === draggedId);
+                      const toIndex = tabIndex;
+                      if (fromIndex !== -1 && toIndex !== -1) {
+                        reorderTabsInSpace(activeSpaceId, fromIndex, toIndex);
+                      }
+                    }
+                    setDraggedTabId(null);
+                    setDragOverTabId(null);
                   }}
                 >
                   <div className="sidebar__tab-indicator" />
@@ -4396,19 +5217,69 @@ const App = () => {
 
       <main className="main-area">
         <div className="main-toolbar">
-          <input
-            ref={addressInputRef}
-            className="main-toolbar__input"
-            placeholder="주소 또는 명령 입력…"
-            value={addressValue}
-            onFocus={event => {
-              setIsAddressFocused(true);
-              event.currentTarget.select();
-            }}
-            onBlur={() => setIsAddressFocused(false)}
-            onChange={event => setAddressValue(event.target.value)}
-            onKeyDown={handleAddressKeyDown}
-          />
+          <div className="main-toolbar__input-wrapper">
+            <input
+              ref={addressInputRef}
+              className="main-toolbar__input"
+              placeholder="주소 또는 명령 입력…"
+              value={addressValue}
+              onFocus={event => {
+                setIsAddressFocused(true);
+                event.currentTarget.select();
+              }}
+              onBlur={() => {
+                // Delay to allow click on suggestion
+                setTimeout(() => setIsAddressFocused(false), 200);
+              }}
+              onChange={event => setAddressValue(event.target.value)}
+              onKeyDown={handleAddressKeyDown}
+            />
+            {addressSuggestions.length > 0 && isAddressFocused && (
+              <div className="address-suggestions">
+                {addressSuggestions.map((suggestion, index) => (
+                  <div
+                    key={suggestion.id}
+                    className={`address-suggestion${index === selectedSuggestionIndex ? ' is-selected' : ''}`}
+                    onMouseDown={event => {
+                      event.preventDefault();
+                      setAddressValue(suggestion.url);
+                      setAddressSuggestions([]);
+                      setSelectedSuggestionIndex(-1);
+                      if (!activeTab) return;
+                      updateTabById(activeTab.id, tab => ({
+                        ...tab,
+                        url: suggestion.url,
+                        title: suggestion.title,
+                        isLoading: true,
+                        updatedAt: Date.now(),
+                      }));
+                      addressInputRef.current?.blur();
+                    }}
+                  >
+                    {suggestion.favicon && (
+                      <img
+                        src={suggestion.favicon}
+                        alt=""
+                        className="address-suggestion__favicon"
+                        onError={e => {
+                          e.currentTarget.style.display = 'none';
+                        }}
+                      />
+                    )}
+                    <div className="address-suggestion__content">
+                      <div className="address-suggestion__title">{suggestion.title}</div>
+                      <div className="address-suggestion__url">{suggestion.url}</div>
+                    </div>
+                    <div className="address-suggestion__meta">
+                      {suggestion.visitCount > 1 && (
+                        <span className="address-suggestion__visits">{suggestion.visitCount} visits</span>
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
           <div className="main-toolbar__actions">
             <button
               className="main-toolbar__button"
@@ -4497,6 +5368,74 @@ const App = () => {
                 ⇆
               </button>
             </div>
+            <span className="main-toolbar__divider" aria-hidden="true" />
+            <div className="profile-menu">
+              <button
+                className="profile-menu__avatar"
+                type="button"
+                onClick={() => setIsProfileMenuOpen(!isProfileMenuOpen)}
+                title={activeProfile?.name || 'Profile'}
+                style={{ backgroundColor: activeProfile?.color }}
+              >
+                {activeProfile?.icon || (activeProfile?.name?.[0] || 'U')}
+              </button>
+              {isProfileMenuOpen && (
+                <div className="profile-menu__dropdown">
+                  <div className="profile-menu__section">
+                    <div className="profile-menu__label">Profiles</div>
+                    {profiles.map(profile => (
+                      <button
+                        key={profile.id}
+                        type="button"
+                        className={`profile-menu__item${activeProfile?.id === profile.id ? ' is-active' : ''}`}
+                        onClick={() => {
+                          setIsProfileMenuOpen(false);
+                          // Open profile in new window if different from current
+                          if (profile.id !== activeProfile?.id) {
+                            window.sylph?.openProfileWindow(profile.id);
+                          }
+                        }}
+                      >
+                        <div
+                          className="profile-menu__item-avatar"
+                          style={{ backgroundColor: profile.color }}
+                        >
+                          {profile.icon || profile.name[0]}
+                        </div>
+                        <span className="profile-menu__item-name">{profile.name}</span>
+                        {profile.isIncognito && (
+                          <span className="profile-menu__item-badge">Incognito</span>
+                        )}
+                      </button>
+                    ))}
+                  </div>
+                  <div className="profile-menu__divider" />
+                  <button
+                    type="button"
+                    className="profile-menu__item"
+                    onClick={() => {
+                      setIsProfileMenuOpen(false);
+                      setIsAddProfileModalOpen(true);
+                      setNewProfileName('');
+                    }}
+                  >
+                    <span className="profile-menu__item-icon">+</span>
+                    <span className="profile-menu__item-name">Add New Profile</span>
+                  </button>
+                  <button
+                    type="button"
+                    className="profile-menu__item"
+                    onClick={() => {
+                      createIncognitoTab();
+                      setIsProfileMenuOpen(false);
+                    }}
+                  >
+                    <span className="profile-menu__item-icon">🕵️</span>
+                    <span className="profile-menu__item-name">Open Incognito</span>
+                  </button>
+                </div>
+              )}
+            </div>
           </div>
         </div>
         <div
@@ -4510,14 +5449,20 @@ const App = () => {
             } else if (secondaryTab && tab.id === secondaryTab.id) {
               pane = 'secondary';
             }
+
+            // Get partition from profile
+            const profile = profiles.find(p => p.id === tab.profileId);
+            const partition = profile?.partition || 'persist:sylph';
+
             return (
               <webview
                 key={tab.id}
                 ref={element => handleWebviewRef(tab.id, element)}
                 src={tab.url || homePageUrl || DEFAULT_HOME_URL}
-                partition="persist:sylph"
+                partition={partition}
                 useragent={DEFAULT_USER_AGENT}
                 allowpopups={true}
+                webpreferences="nativeWindowOpen=no"
                 data-pane={pane}
                 data-active={tab.isActive ? 'true' : 'false'}
               />
@@ -5175,6 +6120,60 @@ const App = () => {
         >
           ‹
         </button>
+      )}
+
+      {/* Add Profile Modal */}
+      {isAddProfileModalOpen && (
+        <div className="modal-overlay" onClick={() => setIsAddProfileModalOpen(false)}>
+          <div className="modal-content" onClick={e => e.stopPropagation()}>
+            <h3 className="modal-title">Create New Profile</h3>
+            <input
+              type="text"
+              className="modal-input"
+              placeholder="Profile name"
+              value={newProfileName}
+              onChange={e => setNewProfileName(e.target.value)}
+              onKeyDown={e => {
+                if (e.key === 'Enter' && newProfileName.trim()) {
+                  const colors = ['#4fb276', '#60a5fa', '#f472b6', '#facc15', '#f97316', '#a78bfa'];
+                  const color = colors[Math.floor(Math.random() * colors.length)];
+                  createProfile(newProfileName.trim(), color);
+                  setIsAddProfileModalOpen(false);
+                  setNewProfileName('');
+                }
+                if (e.key === 'Escape') {
+                  setIsAddProfileModalOpen(false);
+                }
+              }}
+              autoFocus
+            />
+            <div className="modal-actions">
+              <button
+                type="button"
+                className="modal-button modal-button--secondary"
+                onClick={() => setIsAddProfileModalOpen(false)}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="modal-button modal-button--primary"
+                onClick={() => {
+                  if (newProfileName.trim()) {
+                    const colors = ['#4fb276', '#60a5fa', '#f472b6', '#facc15', '#f97316', '#a78bfa'];
+                    const color = colors[Math.floor(Math.random() * colors.length)];
+                    createProfile(newProfileName.trim(), color);
+                    setIsAddProfileModalOpen(false);
+                    setNewProfileName('');
+                  }
+                }}
+                disabled={!newProfileName.trim()}
+              >
+                Create
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );

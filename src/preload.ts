@@ -53,6 +53,7 @@ const api = {
     };
   },
   openSettingsWindow: () => ipcRenderer.invoke('open-settings-window'),
+  openProfileWindow: (profileId: string) => ipcRenderer.invoke('open-profile-window', profileId),
   requestTabContextMenu: (payload: {
     tabId: string;
     isPinned?: boolean;

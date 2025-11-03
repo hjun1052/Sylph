@@ -25,10 +25,12 @@ declare global {
       requestTabContextMenu: (payload: {
         tabId: string;
         isPinned?: boolean;
+        url?: string;
         position: { x: number; y: number };
       }) => Promise<void>;
       getHomePageUrl: () => Promise<string>;
       openSettingsWindow: () => Promise<void>;
+      openProfileWindow: (profileId: string) => Promise<void>;
       settings: {
         getApiKey: () => Promise<string | null>;
         setApiKey: (key: string | null) => Promise<void>;

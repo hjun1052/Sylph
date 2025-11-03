@@ -104,6 +104,10 @@ const PASS_GUARD_PATTERNS: PassGuardPattern[] = [
     reason: 'Notion 인증 페이지 감지',
     test: url => hostEndsWith(url, 'notion.so') && pathnameIncludesAny(url, ['login', 'oauth']),
   },
+  {
+    reason: 'Chrome Web Store 접근',
+    test: url => hostEndsWith(url, 'chromewebstore.google.com') || url.hostname === 'chrome.google.com',
+  },
 ];
 
 export type DetectPassGuardOptions = {
