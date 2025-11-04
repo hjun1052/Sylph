@@ -941,6 +941,7 @@ const App = () => {
   const [isHistoryMenuOpen, setIsHistoryMenuOpen] = useState(false);
   const [historyMenuType, setHistoryMenuType] = useState<'back' | 'forward' | null>(null);
   const [historyMenuPosition, setHistoryMenuPosition] = useState({ x: 0, y: 0 });
+  const [browserActionExtensions, setBrowserActionExtensions] = useState<Array<{ id: string; name: string; icon?: string }>>([]);
 
   const webviewListenersRef = useRef<Map<string, () => void>>(new Map());
   const activeWebviewRef = useRef<WebviewTag | null>(null);
@@ -1218,6 +1219,31 @@ const App = () => {
     setPassGuardIncludeDraft(passGuardSettings.includeHosts.join('\n'));
     setPassGuardExcludeDraft(passGuardSettings.excludeHosts.join('\n'));
   }, [passGuardSettings.includeHosts, passGuardSettings.excludeHosts]);
+
+  // Load extensions list
+  useEffect(() => {
+    const loadExtensions = async () => {
+      try {
+        const result = await window.sylph?.extensions?.list?.();
+        if (result?.success && result.extensions) {
+          // Filter extensions that have browser actions
+          const extensionsWithActions = result.extensions.map(ext => ({
+            id: ext.id,
+            name: ext.name,
+            icon: `crx://extension-icon/${ext.id}/32/0`, // CRX protocol for extension icons
+          }));
+          setBrowserActionExtensions(extensionsWithActions);
+        }
+      } catch (error) {
+        console.error('Failed to load extensions', error);
+      }
+    };
+
+    loadExtensions();
+    // Reload extensions list every 30 seconds to catch newly installed ones
+    const interval = setInterval(loadExtensions, 30000);
+    return () => clearInterval(interval);
+  }, []);
 
   const updatePassGuardSettings = useCallback(
     (
@@ -6367,6 +6393,44 @@ const App = () => {
               ⛊
             </button>
             <span className="main-toolbar__divider" aria-hidden="true" />
+            {/* Extension icons */}
+            {browserActionExtensions.length > 0 && (
+              <>
+                {browserActionExtensions.map(ext => (
+                  <button
+                    key={ext.id}
+                    className="main-toolbar__button"
+                    type="button"
+                    title={ext.name}
+                    onClick={async () => {
+                      try {
+                        await window.sylph?.extensions?.showPopup?.(ext.id);
+                      } catch (error) {
+                        console.error('Failed to show extension popup:', error);
+                      }
+                    }}
+                  >
+                    <img
+                      src={ext.icon}
+                      alt={ext.name}
+                      style={{
+                        width: '20px',
+                        height: '20px',
+                        objectFit: 'contain',
+                      }}
+                      onError={(e) => {
+                        // Fallback to a default icon if the image fails to load
+                        (e.target as HTMLImageElement).style.display = 'none';
+                        const fallback = document.createElement('span');
+                        fallback.textContent = '🧩';
+                        e.currentTarget.parentElement?.appendChild(fallback);
+                      }}
+                    />
+                  </button>
+                ))}
+                <span className="main-toolbar__divider" aria-hidden="true" />
+              </>
+            )}
             <div className="main-toolbar__split-group">
               <button
                 className={`main-toolbar__button${activeSplit.isSplit ? ' is-active' : ''}`}

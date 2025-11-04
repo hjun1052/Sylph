@@ -122,6 +122,23 @@ declare global {
         }>;
         addTab: (webContentsId: number) => Promise<void>;
         selectTab: (webContentsId: number) => Promise<void>;
+        installFromStore: (extensionId: string) => Promise<{
+          success: boolean;
+          extension?: { id: string; name: string; version: string };
+          error?: string;
+        }>;
+        uninstallFromStore: (extensionId: string) => Promise<{
+          success: boolean;
+          error?: string;
+        }>;
+        updateAll: () => Promise<{
+          success: boolean;
+          error?: string;
+        }>;
+        showPopup: (extensionId: string) => Promise<{
+          success: boolean;
+          error?: string;
+        }>;
       };
       content?: {
         captureScreenshot: (payload: { webContentsId: number; format?: 'png' | 'jpeg' }) => Promise<{

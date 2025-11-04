@@ -13,6 +13,7 @@ import { pathToFileURL } from 'url';
 import { ElectronBlocker } from '@ghostery/adblocker-electron';
 import { CosmeticFilter, parseFilter } from '@ghostery/adblocker';
 import { ElectronChromeExtensions } from 'electron-chrome-extensions';
+import { installChromeWebStore, installExtension, updateExtensions } from 'electron-chrome-web-store';
 import OpenAI from 'openai';
 import translate from 'translate-google';
 import { createAetherManager } from './aether-manager';
@@ -414,7 +415,7 @@ const configureSessionHeaders = (target: Electron.Session | null | undefined) =>
   marker.__sylphHeadersPatched = true;
 };
 
-const setupExtensions = () => {
+const setupExtensions = async () => {
   const sylphSession = session.fromPartition('persist:sylph');
 
   extensions = new ElectronChromeExtensions({
@@ -467,9 +468,23 @@ const setupExtensions = () => {
 
   // Handle CRX protocol for extension icons in default session (for UI)
   ElectronChromeExtensions.handleCRXProtocol(session.defaultSession);
+
+  // Install Chrome Web Store support
+  try {
+    await installChromeWebStore({
+      session: sylphSession,
+      extensionsPath: path.join(app.getPath('userData'), 'Extensions'),
+      autoUpdate: true,
+      loadExtensions: true,
+      allowUnpackedExtensions: false,
+    });
+    console.log('Chrome Web Store support installed successfully');
+  } catch (error) {
+    console.error('Failed to install Chrome Web Store support:', error);
+  }
 };
 
-const configureDefaultSession = () => {
+const configureDefaultSession = async () => {
   const defaultSession = session.defaultSession;
   const sylphSession = session.fromPartition('persist:sylph');
   configureSessionHeaders(defaultSession);
@@ -477,7 +492,7 @@ const configureDefaultSession = () => {
   // Attach adblocker (will skip if already attached via session-created event)
   void attachAdblockerToSession(defaultSession);
   void attachAdblockerToSession(sylphSession);
-  setupExtensions();
+  await setupExtensions();
 };
 
 const createWindow = (profileId?: string) => {
@@ -542,8 +557,8 @@ const ensureSettingsWindow = (parent?: BrowserWindow | null) => {
   return settingsWindow;
 };
 
-app.whenReady().then(() => {
-  configureDefaultSession();
+app.whenReady().then(async () => {
+  await configureDefaultSession();
   createApplicationMenu();
   setupWebviewContextMenus();
   createWindow();
@@ -1160,6 +1175,104 @@ ipcMain.handle('extensions:select-tab', async (_event, payload: { webContentsId:
   const webContents = require('electron').webContents.fromId(payload.webContentsId);
   if (!webContents) return;
   extensions.selectTab(webContents);
+});
+
+// Chrome Web Store IPC handlers
+ipcMain.handle('extensions:install-from-store', async (_event, extensionId: string) => {
+  try {
+    const ext = await installExtension(extensionId, {
+      session: session.fromPartition('persist:sylph'),
+      extensionsPath: path.join(app.getPath('userData'), 'Extensions'),
+      loadExtensionOptions: { allowFileAccess: false },
+    });
+    return {
+      success: true,
+      extension: {
+        id: ext.id,
+        name: ext.name,
+        version: (ext as any).version || ext.manifest?.version || '0'
+      }
+    };
+  } catch (error) {
+    return { success: false, error: error instanceof Error ? error.message : String(error) };
+  }
+});
+
+ipcMain.handle('extensions:uninstall-from-store', async (_event, extensionId: string) => {
+  try {
+    const { uninstallExtension } = require('electron-chrome-web-store');
+    await uninstallExtension(extensionId, {
+      session: session.fromPartition('persist:sylph'),
+      extensionsPath: path.join(app.getPath('userData'), 'Extensions'),
+    });
+    return { success: true };
+  } catch (error) {
+    return { success: false, error: error instanceof Error ? error.message : String(error) };
+  }
+});
+
+ipcMain.handle('extensions:update-all', async () => {
+  try {
+    await updateExtensions(session.fromPartition('persist:sylph'));
+    return { success: true };
+  } catch (error) {
+    return { success: false, error: error instanceof Error ? error.message : String(error) };
+  }
+});
+
+ipcMain.handle('extensions:show-popup', async (event, extensionId: string) => {
+  try {
+    if (!extensions) {
+      return { success: false, error: 'Extensions not initialized' };
+    }
+
+    const window = BrowserWindow.fromWebContents(event.sender);
+    if (!window) {
+      return { success: false, error: 'Window not found' };
+    }
+
+    // Get the extension
+    const sylphSession = session.fromPartition('persist:sylph');
+    const extension = sylphSession.getAllExtensions().find(ext => ext.id === extensionId);
+
+    if (!extension) {
+      return { success: false, error: 'Extension not found' };
+    }
+
+    // Check if extension has a popup defined in manifest
+    const manifest = extension.manifest as any;
+    const popupPath = manifest?.action?.default_popup || manifest?.browser_action?.default_popup;
+
+    if (popupPath) {
+      // Create a small popup window for the extension
+      const popupWindow = new BrowserWindow({
+        width: 400,
+        height: 600,
+        parent: window,
+        modal: false,
+        show: false,
+        webPreferences: {
+          session: sylphSession,
+          nodeIntegration: false,
+          contextIsolation: true,
+        },
+      });
+
+      // Load the extension popup
+      const popupUrl = `chrome-extension://${extensionId}/${popupPath}`;
+      await popupWindow.loadURL(popupUrl);
+      popupWindow.show();
+
+      // Close popup when it loses focus
+      popupWindow.on('blur', () => {
+        popupWindow.close();
+      });
+    }
+
+    return { success: true };
+  } catch (error) {
+    return { success: false, error: error instanceof Error ? error.message : String(error) };
+  }
 });
 
 // Content feature IPC handlers

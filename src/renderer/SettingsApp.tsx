@@ -1,5 +1,12 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
+type Extension = {
+  id: string;
+  name: string;
+  version: number | string;
+  path?: string;
+};
+
 type SaveStatus = 'idle' | 'saving' | 'saved' | 'error';
 
 const sections = [
@@ -9,6 +16,7 @@ const sections = [
   { id: 'browsing', label: 'Browsing' },
   { id: 'security', label: 'Security' },
   { id: 'passwords', label: 'Passwords' },
+  { id: 'extensions', label: 'Extensions' },
 ] as const;
 
 type SectionId = typeof sections[number]['id'];
@@ -53,6 +61,8 @@ const SettingsApp: React.FC = () => {
   const [privacyMode, setPrivacyMode] = useState(false);
   const [historyRetention, setHistoryRetention] = useState(true);
   const [requireMasterPassword, setRequireMasterPassword] = useState(true);
+  const [extensions, setExtensions] = useState<Extension[]>([]);
+  const [extensionLoading, setExtensionLoading] = useState(false);
   const apiKeyInputRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
@@ -92,6 +102,23 @@ const SettingsApp: React.FC = () => {
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, []);
+
+  const loadExtensions = useCallback(async () => {
+    try {
+      const result = await window.sylph?.extensions?.list?.();
+      if (result?.success && result.extensions) {
+        setExtensions(result.extensions);
+      }
+    } catch (error) {
+      console.error('Failed to load extensions', error);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (activeSection === 'extensions') {
+      loadExtensions();
+    }
+  }, [activeSection, loadExtensions]);
 
   const handleBackdropMouseDown = useCallback((event: React.MouseEvent<HTMLDivElement>) => {
     if (event.target === event.currentTarget) {
@@ -165,6 +192,31 @@ const SettingsApp: React.FC = () => {
       return next;
     });
   }, []);
+
+  const handleUninstallExtension = useCallback(async (extensionId: string) => {
+    try {
+      const result = await window.sylph?.extensions?.uninstallFromStore?.(extensionId);
+      if (result?.success) {
+        await loadExtensions();
+      }
+    } catch (error) {
+      console.error('Failed to uninstall extension', error);
+    }
+  }, [loadExtensions]);
+
+  const handleUpdateAllExtensions = useCallback(async () => {
+    setExtensionLoading(true);
+    try {
+      const result = await window.sylph?.extensions?.updateAll?.();
+      if (result?.success) {
+        await loadExtensions();
+      }
+    } catch (error) {
+      console.error('Failed to update extensions', error);
+    } finally {
+      setExtensionLoading(false);
+    }
+  }, [loadExtensions]);
 
   const renderSection = () => {
     switch (activeSection) {
@@ -400,6 +452,86 @@ const SettingsApp: React.FC = () => {
                   Connect 1Password
                 </button>
               </div>
+            </div>
+          </div>
+        );
+      case 'extensions':
+        return (
+          <div className="settings-section">
+            <div>
+              <h2 className="settings-section-title">Extensions</h2>
+              <p className="settings-section-description">
+                Manage Chrome extensions from the Chrome Web Store.
+              </p>
+            </div>
+            <div className="settings-callout">
+              <div className="settings-callout__title">Chrome Web Store</div>
+              <div className="settings-callout__description">
+                Browse and install extensions directly from the Chrome Web Store. Extensions will be automatically loaded in your browsing sessions.
+              </div>
+              <div className="settings-callout__actions">
+                <button
+                  type="button"
+                  className="settings-button settings-button--primary"
+                  onClick={() => {
+                    // Open Chrome Web Store in a new tab
+                    window.open('https://chromewebstore.google.com/', '_blank');
+                  }}
+                >
+                  Go to Chrome Web Store
+                </button>
+              </div>
+            </div>
+            <div style={{ marginTop: '24px' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
+                <h3 style={{ fontSize: '1rem', fontWeight: 600 }}>Installed Extensions ({extensions.length})</h3>
+                <button
+                  type="button"
+                  className="settings-button"
+                  onClick={handleUpdateAllExtensions}
+                  disabled={extensionLoading || extensions.length === 0}
+                >
+                  Update All
+                </button>
+              </div>
+              {extensions.length === 0 ? (
+                <div className="settings-callout">
+                  <div className="settings-callout__description">
+                    No extensions installed yet. Install extensions from the Chrome Web Store above.
+                  </div>
+                </div>
+              ) : (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                  {extensions.map(ext => (
+                    <div
+                      key={ext.id}
+                      style={{
+                        padding: '12px 16px',
+                        background: 'rgba(28, 87, 66, 0.4)',
+                        borderRadius: '10px',
+                        display: 'flex',
+                        justifyContent: 'space-between',
+                        alignItems: 'center',
+                      }}
+                    >
+                      <div>
+                        <div style={{ fontWeight: 600, marginBottom: '4px' }}>{ext.name}</div>
+                        <div style={{ fontSize: '0.85rem', opacity: 0.7 }}>
+                          Version {ext.version} • {ext.id}
+                        </div>
+                      </div>
+                      <button
+                        type="button"
+                        className="settings-button"
+                        onClick={() => handleUninstallExtension(ext.id)}
+                        disabled={extensionLoading}
+                      >
+                        Uninstall
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
           </div>
         );

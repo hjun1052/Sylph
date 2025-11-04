@@ -220,6 +220,27 @@ const api = {
       ipcRenderer.invoke('extensions:add-tab', { webContentsId }) as Promise<void>,
     selectTab: (webContentsId: number) =>
       ipcRenderer.invoke('extensions:select-tab', { webContentsId }) as Promise<void>,
+    installFromStore: (extensionId: string) =>
+      ipcRenderer.invoke('extensions:install-from-store', extensionId) as Promise<{
+        success: boolean;
+        extension?: { id: string; name: string; version: string };
+        error?: string;
+      }>,
+    uninstallFromStore: (extensionId: string) =>
+      ipcRenderer.invoke('extensions:uninstall-from-store', extensionId) as Promise<{
+        success: boolean;
+        error?: string;
+      }>,
+    updateAll: () =>
+      ipcRenderer.invoke('extensions:update-all') as Promise<{
+        success: boolean;
+        error?: string;
+      }>,
+    showPopup: (extensionId: string) =>
+      ipcRenderer.invoke('extensions:show-popup', extensionId) as Promise<{
+        success: boolean;
+        error?: string;
+      }>,
   },
   content: {
     captureScreenshot: (payload: { webContentsId: number; format?: 'png' | 'jpeg' }) =>
