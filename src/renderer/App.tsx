@@ -1144,7 +1144,7 @@ const App = () => {
 
   const handleSectionDragOver = useCallback(
     (event: ReactDragEvent<HTMLElement>, section: SidebarSection): SidebarDragPayload | null => {
-      const payload = getSidebarDragPayload(event);
+      const payload = draggedItem ?? getSidebarDragPayload(event);
       if (!payload || !allowDropOnSection(payload, section)) {
         return null;
       }
@@ -1155,7 +1155,7 @@ const App = () => {
       setDragOverSection(section);
       return payload;
     },
-    [allowDropOnSection],
+    [allowDropOnSection, draggedItem],
   );
 
   const handleSectionDragLeave = useCallback((event: ReactDragEvent<HTMLElement>, section: SidebarSection) => {
@@ -2019,6 +2019,12 @@ const App = () => {
     [updateSplitState],
   );
 
+  const reorderTabs = useCallback((list: Tab[]) => {
+    const pinned = list.filter(tab => tab.isPinned);
+    const others = list.filter(tab => !tab.isPinned);
+    return [...pinned, ...others];
+  }, []);
+
   const moveTabToSection = useCallback(
     (tabId: string, section: Exclude<SidebarSection, 'bookmarks'>, index?: number) => {
       setTabsBySpace(prev => {
@@ -2075,12 +2081,12 @@ const App = () => {
 
         working.splice(insertIndex, 0, updatedTab);
 
-        const next = { ...prev, [activeSpaceId]: working };
+        const next = { ...prev, [activeSpaceId]: updatedTab.isPinned ? reorderTabs(working) : working };
         reconcileSplitState(activeSpaceId, working);
         return next;
       });
     },
-    [activeSpaceId, reconcileSplitState],
+    [activeSpaceId, reconcileSplitState, reorderTabs],
   );
 
   const ensureSpaceHasActiveTab = useCallback(
@@ -2110,12 +2116,6 @@ const App = () => {
     },
     [ensureSpaceHasActiveTab],
   );
-
-  const reorderTabs = useCallback((list: Tab[]) => {
-    const pinned = list.filter(tab => tab.isPinned);
-    const others = list.filter(tab => !tab.isPinned);
-    return [...pinned, ...others];
-  }, []);
 
   const createSpace = useCallback(() => {
     const spaceId = uuidv4();
@@ -3032,7 +3032,10 @@ const App = () => {
 
   const handleSectionDrop = useCallback(
     (event: ReactDragEvent<HTMLElement>, section: SidebarSection, index?: number) => {
-      const payload = getSidebarDragPayload(event);
+      let payload = getSidebarDragPayload(event);
+      if (!payload && draggedItem) {
+        payload = draggedItem;
+      }
       const currentDropPosition = dropPosition;
       setDraggedItem(null);
       setDragOverItemId(null);
@@ -3097,6 +3100,7 @@ const App = () => {
       allTabs,
       allowDropOnSection,
       bookmarkDatabase.bookmarks,
+      draggedItem,
       closeTab,
       computeInsertIndex,
       createTab,
@@ -4137,7 +4141,7 @@ const App = () => {
   useEffect(() => {
     if (!window.sylph?.onWebviewContextMenuAction) return;
 
-    const unsubscribe = window.sylph.onWebviewContextMenuAction(({ action, webContentsId, url }) => {
+    const unsubscribe = window.sylph.onWebviewContextMenuAction(({ action, webContentsId, url, selection }) => {
       if (!window.sylph?.content) return;
 
       if (action === 'summarize-page') {
@@ -4210,6 +4214,73 @@ const App = () => {
               x: 100,
               y: 100,
               content: result.error || 'Failed to translate',
+              isLoading: false,
+            });
+          }
+        }).catch(error => {
+          setSummaryPopup({
+            x: 100,
+            y: 100,
+            content: error instanceof Error ? error.message : 'Error',
+            isLoading: false,
+          });
+        });
+      } else if (action === 'summarize-selection' && selection) {
+        setSummaryPopup({
+          x: 100,
+          y: 100,
+          content: '',
+          isLoading: true,
+        });
+        void window.sylph.content.summarizeSelection({
+          text: selection,
+        }).then(result => {
+          if (result.success && result.summary) {
+            setSummaryPopup({
+              x: 100,
+              y: 100,
+              content: result.summary,
+              isLoading: false,
+            });
+          } else {
+            setSummaryPopup({
+              x: 100,
+              y: 100,
+              content: result.error || 'Failed to summarize selection',
+              isLoading: false,
+            });
+          }
+        }).catch(error => {
+          setSummaryPopup({
+            x: 100,
+            y: 100,
+            content: error instanceof Error ? error.message : 'Error',
+            isLoading: false,
+          });
+        });
+      } else if (action === 'translate-selection' && selection) {
+        setSummaryPopup({
+          x: 100,
+          y: 100,
+          content: '',
+          isLoading: true,
+        });
+        void window.sylph.content.translateSelection({
+          text: selection,
+          targetLang: 'ko',
+        }).then(result => {
+          if (result.success && result.translation) {
+            setSummaryPopup({
+              x: 100,
+              y: 100,
+              content: result.translation,
+              isLoading: false,
+            });
+          } else {
+            setSummaryPopup({
+              x: 100,
+              y: 100,
+              content: result.error || 'Failed to translate selection',
               isLoading: false,
             });
           }
@@ -6039,10 +6110,7 @@ const App = () => {
               className={`sidebar__tab-list${dragOverSection === 'pinned' ? ' is-drop-target' : ''}`}
               style={pinnedTabs.length === 0 ? { minHeight: '32px' } : undefined}
               onDragOver={event => {
-                const payload = handleSectionDragOver(event, 'pinned');
-                if (payload) {
-                  setDragOverItemId(null);
-                }
+                handleSectionDragOver(event, 'pinned');
               }}
               onDragLeave={event => handleSectionDragLeave(event, 'pinned')}
               onDrop={event => handleSectionDrop(event, 'pinned', pinnedTabs.length)}
@@ -6223,10 +6291,7 @@ const App = () => {
               className={`sidebar__tab-list${dragOverSection === 'tabs' ? ' is-drop-target' : ''}`}
               style={unpinnedTabs.length === 0 ? { minHeight: '32px' } : undefined}
               onDragOver={event => {
-                const payload = handleSectionDragOver(event, 'tabs');
-                if (payload) {
-                  setDragOverItemId(null);
-                }
+                handleSectionDragOver(event, 'tabs');
               }}
               onDragLeave={event => handleSectionDragLeave(event, 'tabs')}
               onDrop={event => handleSectionDrop(event, 'tabs', unpinnedTabs.length)}

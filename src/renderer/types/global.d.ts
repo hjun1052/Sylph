@@ -23,7 +23,7 @@ declare global {
       onAppAction: (handler: (payload: { action: string }) => void) => () => void;
       onTabAction: (handler: (payload: { action: string; tabId: string }) => void) => () => void;
       onWebviewAction: (handler: (payload: { url: string }) => void) => () => void;
-      onWebviewContextMenuAction: (handler: (payload: { action: string; webContentsId: number; url?: string }) => void) => () => void;
+      onWebviewContextMenuAction: (handler: (payload: { action: string; webContentsId: number; url?: string; selection?: string }) => void) => () => void;
       showWebviewContextMenu: (payload: {
         params: Electron.ContextMenuParams;
         webContentsId: number;
@@ -169,6 +169,16 @@ declare global {
           translation?: string;
           error?: string;
         }>;
+        summarizeSelection: (payload: { text: string }) => Promise<{
+          success: boolean;
+          summary?: string;
+          error?: string;
+        }>;
+        translateSelection: (payload: { text: string; targetLang?: string }) => Promise<{
+          success: boolean;
+          translation?: string;
+          error?: string;
+        }>;
         summarizeUrl: (payload: { url: string }) => Promise<{
           success: boolean;
           summary?: string;
@@ -184,6 +194,115 @@ declare global {
         cancelDownload: (payload: { id: string }) => Promise<{ success: boolean }>;
         openDownload: (payload: { path: string }) => Promise<{ success: boolean }>;
         showInFolder: (payload: { path: string }) => Promise<{ success: boolean }>;
+      };
+      flowpass?: {
+        initialize: (profileId: string) => Promise<{
+          success: boolean;
+          hasVault?: boolean;
+          isConfigured?: boolean;
+          error?: string;
+        }>;
+        setup: (payload: { profileId: string; masterPassword: string }) => Promise<{
+          success: boolean;
+          error?: string;
+        }>;
+        unlock: (payload: { profileId: string; masterPassword: string }) => Promise<{
+          success: boolean;
+          error?: string;
+        }>;
+        lock: () => Promise<{
+          success: boolean;
+          error?: string;
+        }>;
+        getStatus: () => Promise<{
+          success: boolean;
+          status?: 'locked' | 'unlocking' | 'unlocked';
+          error?: string;
+        }>;
+        getConfig: () => Promise<{
+          success: boolean;
+          config?: any;
+          error?: string;
+        }>;
+        updateConfig: (payload: { profileId: string; updates: any }) => Promise<{
+          success: boolean;
+          error?: string;
+        }>;
+        getEntries: () => Promise<{
+          success: boolean;
+          entries?: any[];
+          error?: string;
+        }>;
+        getEntry: (entryId: string) => Promise<{
+          success: boolean;
+          entry?: any;
+          error?: string;
+        }>;
+        saveEntry: (payload: { profileId: string; entry: any; masterPassword: string }) => Promise<{
+          success: boolean;
+          error?: string;
+        }>;
+        deleteEntry: (payload: { profileId: string; entryId: string; masterPassword: string }) => Promise<{
+          success: boolean;
+          deleted?: boolean;
+          error?: string;
+        }>;
+        getMatches: (hostname: string) => Promise<{
+          success: boolean;
+          matches?: Array<{
+            entryId: string;
+            name: string;
+            username: string;
+            lastUsedAt: number;
+          }>;
+          error?: string;
+        }>;
+        getCredentials: (entryId: string) => Promise<{
+          success: boolean;
+          credentials?: { username: string; password: string } | null;
+          error?: string;
+        }>;
+        captureLogin: (payload: { host: string; url: string; username: string; password: string }) => Promise<{
+          success: boolean;
+          error?: string;
+        }>;
+        getCapturedLogins: () => Promise<{
+          success: boolean;
+          captures?: Array<{
+            host: string;
+            url: string;
+            username: string;
+            password: string;
+            timestamp: number;
+          }>;
+          error?: string;
+        }>;
+        clearCaptureBuffer: () => Promise<{
+          success: boolean;
+          error?: string;
+        }>;
+        addNeverSaveHost: (hostname: string) => Promise<{
+          success: boolean;
+          error?: string;
+        }>;
+        removeNeverSaveHost: (hostname: string) => Promise<{
+          success: boolean;
+          removed?: boolean;
+          error?: string;
+        }>;
+        changeMasterPassword: (payload: { profileId: string; currentPassword: string; newPassword: string }) => Promise<{
+          success: boolean;
+          error?: string;
+        }>;
+        exportEncrypted: (profileId: string) => Promise<{
+          success: boolean;
+          data?: string;
+          error?: string;
+        }>;
+        importEntries: (payload: { profileId: string; entries: any[]; masterPassword: string }) => Promise<{
+          success: boolean;
+          error?: string;
+        }>;
       };
     };
   }

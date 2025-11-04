@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { FlowPassSettings } from './flowpass/FlowPassSettings';
 
 type Extension = {
   id: string;
@@ -18,6 +19,7 @@ const sections = [
   { id: 'browsing', label: 'Browsing' },
   { id: 'security', label: 'Security' },
   { id: 'passwords', label: 'Passwords' },
+  { id: 'flowpass', label: 'FlowPass' },
   { id: 'extensions', label: 'Extensions' },
 ] as const;
 
@@ -444,11 +446,15 @@ const SettingsApp: React.FC = () => {
             <div className="settings-callout">
               <div className="settings-callout__title">Password manager</div>
               <div className="settings-callout__description">
-                Sylph can reuse the macOS keychain or delegate to an external manager. Integrations are in preview.
+                Use FlowPass, Sylph's built-in password manager with secure encryption, or integrate with external password managers.
               </div>
               <div className="settings-callout__actions">
-                <button type="button" className="settings-button">
-                  Open keychain
+                <button
+                  type="button"
+                  className="settings-button settings-button--primary"
+                  onClick={() => setActiveSection('flowpass')}
+                >
+                  Open FlowPass
                 </button>
                 <button type="button" className="settings-button" disabled>
                   Connect 1Password
@@ -457,6 +463,8 @@ const SettingsApp: React.FC = () => {
             </div>
           </div>
         );
+      case 'flowpass':
+        return <FlowPassSettings />;
       case 'extensions':
         return (
           <div className="settings-section">

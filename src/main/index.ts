@@ -26,6 +26,8 @@ import type {
   StartAutomationRequest,
 } from '../shared/aether';
 import { DEFAULT_ACCEPT_LANGUAGE, DEFAULT_USER_AGENT } from '../shared/network';
+import { flowPassService } from '../flowpass/flowpass-service';
+import type { VaultEntry } from '../flowpass/types';
 
 declare const MAIN_WINDOW_WEBPACK_ENTRY: string;
 declare const MAIN_WINDOW_PRELOAD_WEBPACK_ENTRY: string;
@@ -810,15 +812,15 @@ const setupWebviewContextMenus = () => {
       return { action: 'deny' };
     });
 
-    contents.on('context-menu', (contextEvent, params) => {
-      contextEvent.preventDefault();
+  contents.on('context-menu', (contextEvent, params) => {
+    contextEvent.preventDefault();
 
-      const parentWebContents = contents.hostWebContents ?? contents;
-      const parentWindow = BrowserWindow.fromWebContents(parentWebContents);
+    const parentWebContents = contents.hostWebContents ?? contents;
+    const parentWindow = BrowserWindow.fromWebContents(parentWebContents);
 
-      const editItems: MenuItemConstructorOptions[] = params.isEditable
-        ? [{ role: 'paste' as const }]
-        : [];
+    const editItems: MenuItemConstructorOptions[] = params.isEditable
+      ? [{ role: 'paste' as const }]
+      : [];
 
       const linkItems: MenuItemConstructorOptions[] = params.linkURL
         ? [
@@ -871,6 +873,30 @@ const setupWebviewContextMenus = () => {
           click: () => contents.openDevTools({ mode: 'detach' }),
         },
       ];
+
+      if (params.selectionText && params.selectionText.trim().length > 0) {
+        template.push({
+          label: 'Summarize Selection',
+          click: () => {
+            parentWebContents.send('webview:context-menu-action', {
+              action: 'summarize-selection',
+              webContentsId: contents.id,
+              selection: params.selectionText,
+            });
+          },
+        });
+        template.push({
+          label: 'Translate Selection',
+          click: () => {
+            parentWebContents.send('webview:context-menu-action', {
+              action: 'translate-selection',
+              webContentsId: contents.id,
+              selection: params.selectionText,
+            });
+          },
+        });
+        template.push({ type: 'separator' });
+      }
 
       const menu = Menu.buildFromTemplate(template);
       menu.popup({ window: parentWindow ?? undefined });
@@ -1502,6 +1528,51 @@ ipcMain.handle('content:translate-page', async (_event, payload: { webContentsId
   }
 });
 
+ipcMain.handle('content:summarize-selection', async (_event, payload: { text: string }) => {
+  try {
+    const settings = await readSettings();
+    const apiKey = settings.openaiApiKey;
+    if (!apiKey) {
+      return { success: false, error: 'API key not configured' };
+    }
+    const trimmed = (payload.text ?? '').trim();
+    if (!trimmed) {
+      return { success: false, error: 'Nothing selected' };
+    }
+
+    const openai = new OpenAI({ apiKey });
+    const response = await openai.chat.completions.create({
+      model: 'gpt-4o-mini',
+      messages: [
+        {
+          role: 'user',
+          content: `Summarize the following text in 2 sentences:\n\n${trimmed}`,
+        },
+      ],
+      max_tokens: 150,
+    });
+
+    const summary = response.choices[0]?.message?.content || '';
+    return { success: true, summary };
+  } catch (error) {
+    return { success: false, error: error instanceof Error ? error.message : String(error) };
+  }
+});
+
+ipcMain.handle('content:translate-selection', async (_event, payload: { text: string; targetLang?: string }) => {
+  try {
+    const trimmed = (payload.text ?? '').trim();
+    if (!trimmed) {
+      return { success: false, error: 'Nothing selected' };
+    }
+    const targetLang = payload.targetLang || 'ko';
+    const translated = await translate(trimmed, { to: targetLang });
+    return { success: true, translation: translated };
+  } catch (error) {
+    return { success: false, error: error instanceof Error ? error.message : String(error) };
+  }
+});
+
 ipcMain.handle('content:summarize-url', async (_event, payload: { url: string }) => {
   try {
     const settings = await readSettings();
@@ -1708,4 +1779,206 @@ ipcMain.handle('webview:show-context-menu', async (event, payload: {
 
   const menu = Menu.buildFromTemplate(template);
   menu.popup({ window });
+});
+
+// FlowPass IPC handlers
+ipcMain.handle('flowpass:initialize', async (_event, profileId: string) => {
+  try {
+    const result = await flowPassService.initialize(profileId);
+    return { success: true, ...result };
+  } catch (error) {
+    return { success: false, error: error instanceof Error ? error.message : String(error) };
+  }
+});
+
+ipcMain.handle('flowpass:setup', async (_event, payload: { profileId: string; masterPassword: string }) => {
+  try {
+    await flowPassService.setup(payload.profileId, payload.masterPassword);
+    return { success: true };
+  } catch (error) {
+    return { success: false, error: error instanceof Error ? error.message : String(error) };
+  }
+});
+
+ipcMain.handle('flowpass:unlock', async (_event, payload: { profileId: string; masterPassword: string }) => {
+  try {
+    await flowPassService.unlock(payload.profileId, payload.masterPassword);
+    return { success: true };
+  } catch (error) {
+    return { success: false, error: error instanceof Error ? error.message : String(error) };
+  }
+});
+
+ipcMain.handle('flowpass:lock', async () => {
+  try {
+    flowPassService.lock();
+    return { success: true };
+  } catch (error) {
+    return { success: false, error: error instanceof Error ? error.message : String(error) };
+  }
+});
+
+ipcMain.handle('flowpass:get-status', async () => {
+  try {
+    const status = flowPassService.getStatus();
+    return { success: true, status };
+  } catch (error) {
+    return { success: false, error: error instanceof Error ? error.message : String(error) };
+  }
+});
+
+ipcMain.handle('flowpass:get-config', async () => {
+  try {
+    const config = flowPassService.getConfig();
+    return { success: true, config };
+  } catch (error) {
+    return { success: false, error: error instanceof Error ? error.message : String(error) };
+  }
+});
+
+ipcMain.handle('flowpass:update-config', async (_event, payload: { profileId: string; updates: any }) => {
+  try {
+    await flowPassService.updateConfig(payload.profileId, payload.updates);
+    return { success: true };
+  } catch (error) {
+    return { success: false, error: error instanceof Error ? error.message : String(error) };
+  }
+});
+
+ipcMain.handle('flowpass:get-entries', async () => {
+  try {
+    const entries = flowPassService.getEntries();
+    return { success: true, entries };
+  } catch (error) {
+    return { success: false, error: error instanceof Error ? error.message : String(error) };
+  }
+});
+
+ipcMain.handle('flowpass:get-entry', async (_event, entryId: string) => {
+  try {
+    const entry = flowPassService.getEntry(entryId);
+    return { success: true, entry };
+  } catch (error) {
+    return { success: false, error: error instanceof Error ? error.message : String(error) };
+  }
+});
+
+ipcMain.handle('flowpass:save-entry', async (_event, payload: { profileId: string; entry: VaultEntry; masterPassword: string }) => {
+  try {
+    flowPassService.setEntry(payload.entry);
+    await flowPassService.saveVault(payload.profileId, payload.masterPassword);
+    return { success: true };
+  } catch (error) {
+    return { success: false, error: error instanceof Error ? error.message : String(error) };
+  }
+});
+
+ipcMain.handle('flowpass:delete-entry', async (_event, payload: { profileId: string; entryId: string; masterPassword: string }) => {
+  try {
+    const deleted = flowPassService.deleteEntry(payload.entryId);
+    if (deleted) {
+      await flowPassService.saveVault(payload.profileId, payload.masterPassword);
+    }
+    return { success: true, deleted };
+  } catch (error) {
+    return { success: false, error: error instanceof Error ? error.message : String(error) };
+  }
+});
+
+ipcMain.handle('flowpass:get-matches', async (_event, hostname: string) => {
+  try {
+    const matches = flowPassService.getMatches(hostname);
+    return { success: true, matches };
+  } catch (error) {
+    return { success: false, error: error instanceof Error ? error.message : String(error) };
+  }
+});
+
+ipcMain.handle('flowpass:get-credentials', async (_event, entryId: string) => {
+  try {
+    const credentials = flowPassService.getCredentials(entryId);
+    return { success: true, credentials };
+  } catch (error) {
+    return { success: false, error: error instanceof Error ? error.message : String(error) };
+  }
+});
+
+ipcMain.handle('flowpass:capture-login', async (_event, payload: { host: string; url: string; username: string; password: string }) => {
+  try {
+    flowPassService.captureLogin({
+      ...payload,
+      timestamp: Date.now(),
+    });
+    return { success: true };
+  } catch (error) {
+    return { success: false, error: error instanceof Error ? error.message : String(error) };
+  }
+});
+
+ipcMain.handle('flowpass:get-captured-logins', async () => {
+  try {
+    const captures = flowPassService.getCapturedLogins();
+    return { success: true, captures };
+  } catch (error) {
+    return { success: false, error: error instanceof Error ? error.message : String(error) };
+  }
+});
+
+ipcMain.handle('flowpass:clear-capture-buffer', async () => {
+  try {
+    flowPassService.clearCaptureBuffer();
+    return { success: true };
+  } catch (error) {
+    return { success: false, error: error instanceof Error ? error.message : String(error) };
+  }
+});
+
+ipcMain.handle('flowpass:add-never-save-host', async (_event, hostname: string) => {
+  try {
+    flowPassService.addNeverSaveHost(hostname);
+    return { success: true };
+  } catch (error) {
+    return { success: false, error: error instanceof Error ? error.message : String(error) };
+  }
+});
+
+ipcMain.handle('flowpass:remove-never-save-host', async (_event, hostname: string) => {
+  try {
+    const removed = flowPassService.removeNeverSaveHost(hostname);
+    return { success: true, removed };
+  } catch (error) {
+    return { success: false, error: error instanceof Error ? error.message : String(error) };
+  }
+});
+
+ipcMain.handle('flowpass:change-master-password', async (_event, payload: { profileId: string; currentPassword: string; newPassword: string }) => {
+  try {
+    await flowPassService.changeMasterPassword(
+      payload.profileId,
+      payload.currentPassword,
+      payload.newPassword
+    );
+    return { success: true };
+  } catch (error) {
+    return { success: false, error: error instanceof Error ? error.message : String(error) };
+  }
+});
+
+ipcMain.handle('flowpass:export-encrypted', async (_event, profileId: string) => {
+  try {
+    const data = await flowPassService.exportEncrypted(profileId);
+    return { success: true, data };
+  } catch (error) {
+    return { success: false, error: error instanceof Error ? error.message : String(error) };
+  }
+});
+
+ipcMain.handle('flowpass:import-entries', async (_event, payload: { profileId: string; entries: VaultEntry[]; masterPassword: string }) => {
+  try {
+    flowPassService.importEntries(payload.entries);
+    await flowPassService.saveVault(payload.profileId, payload.masterPassword);
+    return { success: true };
+  } catch (error) {
+    return { success: false, error: error instanceof Error ? error.message : String(error) };
+  }
 });

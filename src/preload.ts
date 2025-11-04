@@ -78,8 +78,8 @@ const api = {
       ipcRenderer.removeListener('webview:open-link-in-new-tab', listener);
     };
   },
-  onWebviewContextMenuAction: (handler: (payload: { action: string; webContentsId: number; url?: string }) => void) => {
-    const listener = (_event: Electron.IpcRendererEvent, payload: { action: string; webContentsId: number; url?: string }) => {
+  onWebviewContextMenuAction: (handler: (payload: { action: string; webContentsId: number; url?: string; selection?: string }) => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, payload: { action: string; webContentsId: number; url?: string; selection?: string }) => {
       handler(payload);
     };
     ipcRenderer.on('webview:context-menu-action', listener);
@@ -283,6 +283,18 @@ const api = {
         translation?: string;
         error?: string;
       }>,
+    summarizeSelection: (payload: { text: string }) =>
+      ipcRenderer.invoke('content:summarize-selection', payload) as Promise<{
+        success: boolean;
+        summary?: string;
+        error?: string;
+      }>,
+    translateSelection: (payload: { text: string; targetLang?: string }) =>
+      ipcRenderer.invoke('content:translate-selection', payload) as Promise<{
+        success: boolean;
+        translation?: string;
+        error?: string;
+      }>,
     summarizeUrl: (payload: { url: string }) =>
       ipcRenderer.invoke('content:summarize-url', payload) as Promise<{
         success: boolean;
@@ -328,6 +340,136 @@ const api = {
       ipcRenderer.invoke('download:open', payload) as Promise<{ success: boolean }>,
     showInFolder: (payload: { path: string }) =>
       ipcRenderer.invoke('download:show-in-folder', payload) as Promise<{ success: boolean }>,
+  },
+  flowpass: {
+    initialize: (profileId: string) =>
+      ipcRenderer.invoke('flowpass:initialize', profileId) as Promise<{
+        success: boolean;
+        hasVault?: boolean;
+        isConfigured?: boolean;
+        error?: string;
+      }>,
+    setup: (payload: { profileId: string; masterPassword: string }) =>
+      ipcRenderer.invoke('flowpass:setup', payload) as Promise<{
+        success: boolean;
+        error?: string;
+      }>,
+    unlock: (payload: { profileId: string; masterPassword: string }) =>
+      ipcRenderer.invoke('flowpass:unlock', payload) as Promise<{
+        success: boolean;
+        error?: string;
+      }>,
+    lock: () =>
+      ipcRenderer.invoke('flowpass:lock') as Promise<{
+        success: boolean;
+        error?: string;
+      }>,
+    getStatus: () =>
+      ipcRenderer.invoke('flowpass:get-status') as Promise<{
+        success: boolean;
+        status?: 'locked' | 'unlocking' | 'unlocked';
+        error?: string;
+      }>,
+    getConfig: () =>
+      ipcRenderer.invoke('flowpass:get-config') as Promise<{
+        success: boolean;
+        config?: any;
+        error?: string;
+      }>,
+    updateConfig: (payload: { profileId: string; updates: any }) =>
+      ipcRenderer.invoke('flowpass:update-config', payload) as Promise<{
+        success: boolean;
+        error?: string;
+      }>,
+    getEntries: () =>
+      ipcRenderer.invoke('flowpass:get-entries') as Promise<{
+        success: boolean;
+        entries?: any[];
+        error?: string;
+      }>,
+    getEntry: (entryId: string) =>
+      ipcRenderer.invoke('flowpass:get-entry', entryId) as Promise<{
+        success: boolean;
+        entry?: any;
+        error?: string;
+      }>,
+    saveEntry: (payload: { profileId: string; entry: any; masterPassword: string }) =>
+      ipcRenderer.invoke('flowpass:save-entry', payload) as Promise<{
+        success: boolean;
+        error?: string;
+      }>,
+    deleteEntry: (payload: { profileId: string; entryId: string; masterPassword: string }) =>
+      ipcRenderer.invoke('flowpass:delete-entry', payload) as Promise<{
+        success: boolean;
+        deleted?: boolean;
+        error?: string;
+      }>,
+    getMatches: (hostname: string) =>
+      ipcRenderer.invoke('flowpass:get-matches', hostname) as Promise<{
+        success: boolean;
+        matches?: Array<{
+          entryId: string;
+          name: string;
+          username: string;
+          lastUsedAt: number;
+        }>;
+        error?: string;
+      }>,
+    getCredentials: (entryId: string) =>
+      ipcRenderer.invoke('flowpass:get-credentials', entryId) as Promise<{
+        success: boolean;
+        credentials?: { username: string; password: string } | null;
+        error?: string;
+      }>,
+    captureLogin: (payload: { host: string; url: string; username: string; password: string }) =>
+      ipcRenderer.invoke('flowpass:capture-login', payload) as Promise<{
+        success: boolean;
+        error?: string;
+      }>,
+    getCapturedLogins: () =>
+      ipcRenderer.invoke('flowpass:get-captured-logins') as Promise<{
+        success: boolean;
+        captures?: Array<{
+          host: string;
+          url: string;
+          username: string;
+          password: string;
+          timestamp: number;
+        }>;
+        error?: string;
+      }>,
+    clearCaptureBuffer: () =>
+      ipcRenderer.invoke('flowpass:clear-capture-buffer') as Promise<{
+        success: boolean;
+        error?: string;
+      }>,
+    addNeverSaveHost: (hostname: string) =>
+      ipcRenderer.invoke('flowpass:add-never-save-host', hostname) as Promise<{
+        success: boolean;
+        error?: string;
+      }>,
+    removeNeverSaveHost: (hostname: string) =>
+      ipcRenderer.invoke('flowpass:remove-never-save-host', hostname) as Promise<{
+        success: boolean;
+        removed?: boolean;
+        error?: string;
+      }>,
+    changeMasterPassword: (payload: { profileId: string; currentPassword: string; newPassword: string }) =>
+      ipcRenderer.invoke('flowpass:change-master-password', payload) as Promise<{
+        success: boolean;
+        error?: string;
+      }>,
+    exportEncrypted: (profileId: string) =>
+      ipcRenderer.invoke('flowpass:export-encrypted', profileId) as Promise<{
+        success: boolean;
+        data?: string;
+        error?: string;
+      }>,
+    importEntries: (payload: { profileId: string; entries: any[]; masterPassword: string }) =>
+      ipcRenderer.invoke('flowpass:import-entries', payload) as Promise<{
+        success: boolean;
+        error?: string;
+      }>,
   },
 };
 
