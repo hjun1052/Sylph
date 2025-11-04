@@ -54,6 +54,7 @@
     "electron-squirrel-startup": "^1.0.1",
     "marked": "^12.0.2",
     "openai": "^4.58.1",
+    "translate-google": "^1.5.0",
     "uuid": "^11.1.0"
   }
 }

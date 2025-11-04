@@ -23,6 +23,12 @@ declare global {
       onAppAction: (handler: (payload: { action: string }) => void) => () => void;
       onTabAction: (handler: (payload: { action: string; tabId: string }) => void) => () => void;
       onWebviewAction: (handler: (payload: { url: string }) => void) => () => void;
+      onWebviewContextMenuAction: (handler: (payload: { action: string; webContentsId: number; url?: string }) => void) => () => void;
+      showWebviewContextMenu: (payload: {
+        params: Electron.ContextMenuParams;
+        webContentsId: number;
+        tabId: string;
+      }) => Promise<void>;
       requestTabContextMenu: (payload: {
         tabId: string;
         isPinned?: boolean;

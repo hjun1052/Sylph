@@ -78,6 +78,20 @@ const api = {
       ipcRenderer.removeListener('webview:open-link-in-new-tab', listener);
     };
   },
+  onWebviewContextMenuAction: (handler: (payload: { action: string; webContentsId: number; url?: string }) => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, payload: { action: string; webContentsId: number; url?: string }) => {
+      handler(payload);
+    };
+    ipcRenderer.on('webview:context-menu-action', listener);
+    return () => {
+      ipcRenderer.removeListener('webview:context-menu-action', listener);
+    };
+  },
+  showWebviewContextMenu: (payload: {
+    params: Electron.ContextMenuParams;
+    webContentsId: number;
+    tabId: string;
+  }) => ipcRenderer.invoke('webview:show-context-menu', payload) as Promise<void>,
   settings: {
     getApiKey: () => ipcRenderer.invoke('settings:get-api-key') as Promise<string | null>,
     setApiKey: (key: string | null) => ipcRenderer.invoke('settings:set-api-key', { key }),
@@ -206,6 +220,87 @@ const api = {
       ipcRenderer.invoke('extensions:add-tab', { webContentsId }) as Promise<void>,
     selectTab: (webContentsId: number) =>
       ipcRenderer.invoke('extensions:select-tab', { webContentsId }) as Promise<void>,
+  },
+  content: {
+    captureScreenshot: (payload: { webContentsId: number; format?: 'png' | 'jpeg' }) =>
+      ipcRenderer.invoke('content:capture-screenshot', payload) as Promise<{
+        success: boolean;
+        dataUrl?: string;
+        error?: string;
+      }>,
+    savePage: (payload: { webContentsId: number }) =>
+      ipcRenderer.invoke('content:save-page', payload) as Promise<{
+        success: boolean;
+        path?: string;
+        error?: string;
+      }>,
+    print: (payload: { webContentsId: number }) =>
+      ipcRenderer.invoke('content:print', payload) as Promise<{
+        success: boolean;
+        error?: string;
+      }>,
+    toggleFullscreen: (payload: { webContentsId: number }) =>
+      ipcRenderer.invoke('content:toggle-fullscreen', payload) as Promise<{
+        success: boolean;
+        isFullscreen: boolean;
+      }>,
+    summarizePage: (payload: { webContentsId: number; url: string }) =>
+      ipcRenderer.invoke('content:summarize-page', payload) as Promise<{
+        success: boolean;
+        summary?: string;
+        error?: string;
+      }>,
+    translatePage: (payload: { webContentsId: number; url: string; targetLang?: string }) =>
+      ipcRenderer.invoke('content:translate-page', payload) as Promise<{
+        success: boolean;
+        translation?: string;
+        error?: string;
+      }>,
+    summarizeUrl: (payload: { url: string }) =>
+      ipcRenderer.invoke('content:summarize-url', payload) as Promise<{
+        success: boolean;
+        summary?: string;
+        error?: string;
+      }>,
+  },
+  downloads: {
+    onDownloadStarted: (handler: (item: any) => void) => {
+      const listener = (_event: Electron.IpcRendererEvent, item: any) => {
+        handler(item);
+      };
+      ipcRenderer.on('download:started', listener);
+      return () => {
+        ipcRenderer.removeListener('download:started', listener);
+      };
+    },
+    onDownloadProgress: (handler: (item: any) => void) => {
+      const listener = (_event: Electron.IpcRendererEvent, item: any) => {
+        handler(item);
+      };
+      ipcRenderer.on('download:progress', listener);
+      return () => {
+        ipcRenderer.removeListener('download:progress', listener);
+      };
+    },
+    onDownloadCompleted: (handler: (item: any) => void) => {
+      const listener = (_event: Electron.IpcRendererEvent, item: any) => {
+        handler(item);
+      };
+      ipcRenderer.on('download:completed', listener);
+      return () => {
+        ipcRenderer.removeListener('download:completed', listener);
+      };
+    },
+    pauseDownload: (payload: { id: string }) =>
+      ipcRenderer.invoke('download:pause', payload) as Promise<{ success: boolean }>,
+    resumeDownload: (payload: { id: string }) =>
+      ipcRenderer.invoke('download:resume', payload) as Promise<{ success: boolean }>,
+    cancelDownload: (payload: { id: string }) =>
+      ipcRenderer.invoke('download:cancel', payload) as Promise<{ success: boolean }>,
+    openDownload: (payload: { path: string }) =>
+      ipcRenderer.invoke('download:open', payload) as Promise<{ success: boolean }>,
+    showInFolder: (payload: { path: string }) =>
+      ipcRenderer.invoke('download:show-in-folder', payload) as Promise<{ success: boolean }>,
   },
 };
 

@@ -14,6 +14,7 @@ import { ElectronBlocker } from '@ghostery/adblocker-electron';
 import { CosmeticFilter, parseFilter } from '@ghostery/adblocker';
 import { ElectronChromeExtensions } from 'electron-chrome-extensions';
 import OpenAI from 'openai';
+import translate from 'translate-google';
 import { createAetherManager } from './aether-manager';
 import type {
   AutomationApprovalRequest,
@@ -1159,4 +1160,363 @@ ipcMain.handle('extensions:select-tab', async (_event, payload: { webContentsId:
   const webContents = require('electron').webContents.fromId(payload.webContentsId);
   if (!webContents) return;
   extensions.selectTab(webContents);
+});
+
+// Content feature IPC handlers
+ipcMain.handle('content:capture-screenshot', async (_event, payload: { webContentsId: number; format?: 'png' | 'jpeg' }) => {
+  try {
+    const { webContents } = require('electron');
+    const wc = webContents.fromId(payload.webContentsId);
+    if (!wc) {
+      return { success: false, error: 'WebContents not found' };
+    }
+    const image = await wc.capturePage();
+    const dataUrl = payload.format === 'jpeg'
+      ? image.toJPEG(90).toString('base64')
+      : image.toPNG().toString('base64');
+    return {
+      success: true,
+      dataUrl: `data:image/${payload.format || 'png'};base64,${dataUrl}`
+    };
+  } catch (error) {
+    return { success: false, error: error instanceof Error ? error.message : String(error) };
+  }
+});
+
+ipcMain.handle('content:save-page', async (_event, payload: { webContentsId: number }) => {
+  try {
+    const { webContents, dialog } = require('electron');
+    const wc = webContents.fromId(payload.webContentsId);
+    if (!wc) {
+      return { success: false, error: 'WebContents not found' };
+    }
+    const window = BrowserWindow.fromWebContents(wc);
+    if (!window) {
+      return { success: false, error: 'Window not found' };
+    }
+    const result = await dialog.showSaveDialog(window, {
+      filters: [{ name: 'Webpage', extensions: ['html', 'htm'] }]
+    });
+    if (result.canceled || !result.filePath) {
+      return { success: false, error: 'Save canceled' };
+    }
+    await wc.savePage(result.filePath, 'HTMLComplete');
+    return { success: true, path: result.filePath };
+  } catch (error) {
+    return { success: false, error: error instanceof Error ? error.message : String(error) };
+  }
+});
+
+ipcMain.handle('content:print', async (_event, payload: { webContentsId: number }) => {
+  try {
+    const { webContents } = require('electron');
+    const wc = webContents.fromId(payload.webContentsId);
+    if (!wc) {
+      return { success: false, error: 'WebContents not found' };
+    }
+    wc.print();
+    return { success: true };
+  } catch (error) {
+    return { success: false, error: error instanceof Error ? error.message : String(error) };
+  }
+});
+
+ipcMain.handle('content:toggle-fullscreen', async (_event, payload: { webContentsId: number }) => {
+  try {
+    const { webContents } = require('electron');
+    const wc = webContents.fromId(payload.webContentsId);
+    if (!wc) {
+      return { success: false, isFullscreen: false };
+    }
+    const window = BrowserWindow.fromWebContents(wc);
+    if (!window) {
+      return { success: false, isFullscreen: false };
+    }
+    const isFullscreen = !window.isFullScreen();
+    window.setFullScreen(isFullscreen);
+    return { success: true, isFullscreen };
+  } catch (error) {
+    return { success: false, isFullscreen: false };
+  }
+});
+
+ipcMain.handle('content:summarize-page', async (_event, payload: { webContentsId: number; url: string }) => {
+  try {
+    const { webContents } = require('electron');
+    const wc = webContents.fromId(payload.webContentsId);
+    if (!wc) {
+      return { success: false, error: 'WebContents not found' };
+    }
+
+    // Extract page content
+    const content = await wc.executeJavaScript(`
+      (function() {
+        const title = document.title;
+        const body = document.body.innerText.substring(0, 10000);
+        return { title, body };
+      })()
+    `);
+
+    // Use AI to summarize
+    const settings = await readSettings();
+    const apiKey = settings.openaiApiKey;
+    if (!apiKey) {
+      return { success: false, error: 'API key not configured' };
+    }
+
+    const openai = new OpenAI({ apiKey });
+    const response = await openai.chat.completions.create({
+      model: 'gpt-4o-mini',
+      messages: [
+        {
+          role: 'user',
+          content: `Summarize the following webpage in 2-3 sentences:\n\nTitle: ${content.title}\n\nContent: ${content.body}`
+        }
+      ],
+      max_tokens: 200,
+    });
+
+    const summary = response.choices[0]?.message?.content || '';
+    return { success: true, summary };
+  } catch (error) {
+    return { success: false, error: error instanceof Error ? error.message : String(error) };
+  }
+});
+
+ipcMain.handle('content:translate-page', async (_event, payload: { webContentsId: number; url: string; targetLang?: string }) => {
+  try {
+    const { webContents } = require('electron');
+    const wc = webContents.fromId(payload.webContentsId);
+    if (!wc) {
+      return { success: false, error: 'WebContents not found' };
+    }
+
+    // Extract page content
+    const content = await wc.executeJavaScript(`
+      (function() {
+        const title = document.title;
+        const body = document.body.innerText.substring(0, 5000);
+        return { title, body };
+      })()
+    `);
+
+    // Use translate-google to translate
+    const targetLang = payload.targetLang || 'ko'; // Korean language code
+
+    // Translate title and body separately
+    const translatedTitle = await translate(content.title, { to: targetLang });
+    const translatedBody = await translate(content.body, { to: targetLang });
+
+    const translation = `${translatedTitle}\n\n${translatedBody}`;
+    return { success: true, translation };
+  } catch (error) {
+    return { success: false, error: error instanceof Error ? error.message : String(error) };
+  }
+});
+
+ipcMain.handle('content:summarize-url', async (_event, payload: { url: string }) => {
+  try {
+    const settings = await readSettings();
+    const apiKey = settings.openaiApiKey;
+    if (!apiKey) {
+      return { success: false, error: 'API key not configured' };
+    }
+
+    const openai = new OpenAI({ apiKey });
+    const response = await openai.chat.completions.create({
+      model: 'gpt-4o-mini',
+      messages: [
+        {
+          role: 'user',
+          content: `Based on the URL "${payload.url}", provide a brief 1-sentence prediction of what this page might contain.`
+        }
+      ],
+      max_tokens: 100,
+    });
+
+    const summary = response.choices[0]?.message?.content || '';
+    return { success: true, summary };
+  } catch (error) {
+    return { success: false, error: error instanceof Error ? error.message : String(error) };
+  }
+});
+
+// Download management
+const activeDownloads = new Map<string, any>();
+
+ipcMain.handle('download:pause', async (_event, payload: { id: string }) => {
+  const item = activeDownloads.get(payload.id);
+  if (item && item.canResume()) {
+    item.pause();
+    return { success: true };
+  }
+  return { success: false };
+});
+
+ipcMain.handle('download:resume', async (_event, payload: { id: string }) => {
+  const item = activeDownloads.get(payload.id);
+  if (item && item.canResume()) {
+    item.resume();
+    return { success: true };
+  }
+  return { success: false };
+});
+
+ipcMain.handle('download:cancel', async (_event, payload: { id: string }) => {
+  const item = activeDownloads.get(payload.id);
+  if (item) {
+    item.cancel();
+    activeDownloads.delete(payload.id);
+    return { success: true };
+  }
+  return { success: false };
+});
+
+ipcMain.handle('download:open', async (_event, payload: { path: string }) => {
+  try {
+    const { shell } = require('electron');
+    await shell.openPath(payload.path);
+    return { success: true };
+  } catch (error) {
+    return { success: false };
+  }
+});
+
+ipcMain.handle('download:show-in-folder', async (_event, payload: { path: string }) => {
+  try {
+    const { shell } = require('electron');
+    shell.showItemInFolder(payload.path);
+    return { success: true };
+  } catch (error) {
+    return { success: false };
+  }
+});
+
+// Webview context menu handler
+ipcMain.handle('webview:show-context-menu', async (event, payload: {
+  params: Electron.ContextMenuParams;
+  webContentsId: number;
+  tabId: string;
+}) => {
+  const { params, webContentsId } = payload;
+  const window = BrowserWindow.fromWebContents(event.sender);
+  if (!window) return;
+
+  const template: MenuItemConstructorOptions[] = [];
+
+  // Standard editing actions
+  if (params.misspelledWord) {
+    params.dictionarySuggestions.forEach(suggestion => {
+      template.push({
+        label: suggestion,
+        click: () => {
+          const wc = require('electron').webContents.fromId(webContentsId);
+          if (wc) wc.replaceMisspelling(suggestion);
+        }
+      });
+    });
+    if (params.dictionarySuggestions.length > 0) {
+      template.push({ type: 'separator' });
+    }
+  }
+
+  if (params.selectionText) {
+    template.push({
+      label: 'Copy',
+      accelerator: 'CmdOrCtrl+C',
+      role: 'copy'
+    });
+  }
+
+  if (params.editFlags.canCut) {
+    template.push({
+      label: 'Cut',
+      accelerator: 'CmdOrCtrl+X',
+      role: 'cut'
+    });
+  }
+
+  if (params.editFlags.canPaste) {
+    template.push({
+      label: 'Paste',
+      accelerator: 'CmdOrCtrl+V',
+      role: 'paste'
+    });
+  }
+
+  if (params.editFlags.canSelectAll) {
+    template.push({
+      label: 'Select All',
+      accelerator: 'CmdOrCtrl+A',
+      role: 'selectAll'
+    });
+  }
+
+  // AI-powered features
+  template.push({ type: 'separator' });
+
+  template.push({
+    label: 'Summarize Page',
+    click: () => {
+      event.sender.send('webview:context-menu-action', {
+        action: 'summarize-page',
+        webContentsId
+      });
+    }
+  });
+
+  template.push({
+    label: 'Translate Page',
+    click: () => {
+      event.sender.send('webview:context-menu-action', {
+        action: 'translate-page',
+        webContentsId
+      });
+    }
+  });
+
+  // Link preview
+  if (params.linkURL) {
+    template.push({ type: 'separator' });
+    template.push({
+      label: `Preview: ${params.linkURL.substring(0, 50)}${params.linkURL.length > 50 ? '...' : ''}`,
+      click: () => {
+        event.sender.send('webview:context-menu-action', {
+          action: 'preview-url',
+          url: params.linkURL
+        });
+      }
+    });
+  }
+
+  // Back/Forward/Reload for non-editable areas
+  if (!params.isEditable && template.length > 0) {
+    template.push({ type: 'separator' });
+  }
+
+  if (!params.isEditable) {
+    const wc = require('electron').webContents.fromId(webContentsId);
+    if (wc) {
+      if (wc.canGoBack()) {
+        template.push({
+          label: 'Back',
+          click: () => wc.goBack()
+        });
+      }
+      if (wc.canGoForward()) {
+        template.push({
+          label: 'Forward',
+          click: () => wc.goForward()
+        });
+      }
+      template.push({
+        label: 'Reload',
+        accelerator: 'CmdOrCtrl+R',
+        click: () => wc.reload()
+      });
+    }
+  }
+
+  const menu = Menu.buildFromTemplate(template);
+  menu.popup({ window });
 });

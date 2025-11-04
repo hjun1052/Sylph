@@ -16,6 +16,8 @@ const DEFAULT_SPLIT_RATIO = 0.52;
 const SPACE_COLOR_PALETTE = ['var(--color-green-400)', '#f472b6', '#60a5fa', '#facc15', '#f97316'];
 const clampSplitRatio = (value: number) => Math.min(0.85, Math.max(0.15, value));
 
+type SidebarSection = 'bookmarks' | 'pinned' | 'tabs';
+
 import React, {
   useCallback,
   useEffect,
@@ -23,7 +25,7 @@ import React, {
   useRef,
   useState,
 } from 'react';
-import type { KeyboardEvent as ReactKeyboardEvent } from 'react';
+import type { DragEvent as ReactDragEvent, KeyboardEvent as ReactKeyboardEvent } from 'react';
 import type {
   DidFailLoadEvent,
   DidNavigateEvent,
@@ -55,6 +57,43 @@ import {
   sanitizeHostList,
   type PassGuardSettings,
 } from '../shared/passguard';
+
+type SidebarDragPayload = { type: 'tab'; id: string } | { type: 'bookmark'; id: string };
+
+const SIDEBAR_DRAG_MIME = 'application/x-sylph-sidebar-item';
+
+const setSidebarDragPayload = (event: ReactDragEvent, payload: SidebarDragPayload) => {
+  const transfer = event.dataTransfer;
+  if (!transfer) return;
+  const serialized = JSON.stringify(payload);
+  transfer.setData(SIDEBAR_DRAG_MIME, serialized);
+  transfer.setData('text/plain', serialized);
+  transfer.effectAllowed = 'move';
+};
+
+const getSidebarDragPayload = (event: ReactDragEvent): SidebarDragPayload | null => {
+  const transfer = event.dataTransfer;
+  if (!transfer) return null;
+  const raw =
+    transfer.getData(SIDEBAR_DRAG_MIME) ||
+    transfer.getData('text/plain');
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw) as SidebarDragPayload;
+    if (
+      parsed &&
+      (parsed.type === 'tab' || parsed.type === 'bookmark') &&
+      typeof parsed.id === 'string'
+    ) {
+      return parsed;
+    }
+  } catch {
+    if (typeof raw === 'string') {
+      return { type: 'tab', id: raw };
+    }
+  }
+  return null;
+};
 
 type Space = {
   id: string;
@@ -888,8 +927,10 @@ const App = () => {
   const [spaceContextMenuId, setSpaceContextMenuId] = useState<string | null>(null);
   const [splitStatesBySpace, setSplitStatesBySpace] = useState<Record<string, SplitState>>({});
   const [spaceMenuTabId, setSpaceMenuTabId] = useState<string | null>(null);
-  const [draggedTabId, setDraggedTabId] = useState<string | null>(null);
-  const [dragOverTabId, setDragOverTabId] = useState<string | null>(null);
+  const [draggedItem, setDraggedItem] = useState<{ id: string; type: SidebarDragPayload['type'] } | null>(null);
+  const [dragOverItemId, setDragOverItemId] = useState<string | null>(null);
+  const [dragOverSection, setDragOverSection] = useState<SidebarSection | null>(null);
+  const [dropPosition, setDropPosition] = useState<{ index: number; position: 'before' | 'after' } | null>(null);
   const [isProfileMenuOpen, setIsProfileMenuOpen] = useState(false);
   const [isAddProfileModalOpen, setIsAddProfileModalOpen] = useState(false);
   const [newProfileName, setNewProfileName] = useState('');
@@ -910,6 +951,7 @@ const App = () => {
   const tabsByIdRef = useRef<Map<string, Tab>>(new Map());
   const passGuardAppliedRef = useRef<Map<string, AppliedPassGuardSnapshot>>(new Map());
   const passGuardPanelRef = useRef<HTMLDivElement | null>(null);
+  const bookmarkListRef = useRef<HTMLDivElement | null>(null);
   const [passGuardSettings, setPassGuardSettings] = useState<PassGuardSettings>(() => ({
     ...DEFAULT_PASS_GUARD_SETTINGS,
   }));
@@ -965,6 +1007,10 @@ const App = () => {
   const [expandedFolders, setExpandedFolders] = useState<Set<string>>(new Set([DEFAULT_FOLDER_ID]));
   const [bookmarkSearchQuery, setBookmarkSearchQuery] = useState('');
   const [collapsedSections, setCollapsedSections] = useState<Set<string>>(new Set());
+  const [bookmarkListHeight, setBookmarkListHeight] = useState(0);
+  const [summaryPopup, setSummaryPopup] = useState<{ x: number; y: number; content: string; isLoading: boolean } | null>(null);
+  const [hoveredUrl, setHoveredUrl] = useState<string | null>(null);
+  const [hoverPosition, setHoverPosition] = useState<{ x: number; y: number } | null>(null);
   const [archivedTabs, setArchivedTabs] = useState<ArchivedTab[]>(() => {
     try {
       const stored = window.localStorage?.getItem(ARCHIVE_STORAGE_KEY);
@@ -1024,6 +1070,112 @@ const App = () => {
 
   const pinnedTabs = useMemo(() => tabs.filter(tab => tab.isPinned), [tabs]);
   const unpinnedTabs = useMemo(() => tabs.filter(tab => !tab.isPinned), [tabs]);
+  const bookmarkItems = useMemo(() => Array.from(bookmarkDatabase.bookmarks.values()), [bookmarkDatabase]);
+  const activeSpaceTabs = useMemo(() => tabsBySpace[activeSpaceId] ?? [], [tabsBySpace, activeSpaceId]);
+
+  useEffect(() => {
+    const listElement = bookmarkListRef.current;
+    if (!listElement) {
+      setBookmarkListHeight(0);
+      return;
+    }
+
+    if (collapsedSections.has('bookmarks')) {
+      setBookmarkListHeight(0);
+      return;
+    }
+
+    const updateHeight = () => {
+      const el = bookmarkListRef.current;
+      if (!el) {
+        return;
+      }
+      setBookmarkListHeight(el.scrollHeight);
+    };
+
+    updateHeight();
+
+    if (typeof ResizeObserver !== 'undefined') {
+      const observer = new ResizeObserver(() => updateHeight());
+      observer.observe(listElement);
+      return () => observer.disconnect();
+    }
+
+    window.addEventListener('resize', updateHeight);
+    return () => window.removeEventListener('resize', updateHeight);
+  }, [bookmarkItems, collapsedSections]);
+
+  const allowDropOnSection = useCallback((payload: SidebarDragPayload, section: SidebarSection) => {
+    if (section === 'bookmarks') {
+      return payload.type === 'tab';
+    }
+    return payload.type === 'tab' || payload.type === 'bookmark';
+  }, []);
+
+  const handleSectionDragOver = useCallback(
+    (event: ReactDragEvent<HTMLElement>, section: SidebarSection): SidebarDragPayload | null => {
+      const payload = getSidebarDragPayload(event);
+      if (!payload || !allowDropOnSection(payload, section)) {
+        return null;
+      }
+      event.preventDefault();
+      if (event.dataTransfer) {
+        event.dataTransfer.dropEffect = 'move';
+      }
+      setDragOverSection(section);
+      return payload;
+    },
+    [allowDropOnSection],
+  );
+
+  const handleSectionDragLeave = useCallback((event: ReactDragEvent<HTMLElement>, section: SidebarSection) => {
+    const nextTarget = event.relatedTarget as Node | null;
+    const current = event.currentTarget as HTMLElement;
+    if (nextTarget && current.contains(nextTarget)) {
+      return;
+    }
+    setDragOverSection(prev => (prev === section ? null : prev));
+  }, []);
+
+  const computeInsertIndex = useCallback(
+    (section: Exclude<SidebarSection, 'bookmarks'>, index?: number) => {
+      const pinnedPositions: number[] = [];
+      const unpinnedPositions: number[] = [];
+      activeSpaceTabs.forEach((tab, position) => {
+        if (tab.isPinned) {
+          pinnedPositions.push(position);
+        } else {
+          unpinnedPositions.push(position);
+        }
+      });
+
+      if (section === 'pinned') {
+        if (typeof index === 'number') {
+          if (index < 0) return 0;
+          if (index < pinnedPositions.length) {
+            return pinnedPositions[index];
+          }
+          const lastPinned = pinnedPositions[pinnedPositions.length - 1];
+          return lastPinned != null ? lastPinned + 1 : 0;
+        }
+        const lastPinned = pinnedPositions[pinnedPositions.length - 1];
+        return lastPinned != null ? lastPinned + 1 : 0;
+      }
+
+      if (typeof index === 'number') {
+        if (index < 0) {
+          const firstUnpinned = unpinnedPositions[0];
+          return firstUnpinned ?? activeSpaceTabs.length;
+        }
+        if (index < unpinnedPositions.length) {
+          return unpinnedPositions[index];
+        }
+        return activeSpaceTabs.length;
+      }
+      return activeSpaceTabs.length;
+    },
+    [activeSpaceTabs],
+  );
 
   const allTabs = useMemo(
     () => Object.values(tabsBySpace).flatMap(spaceTabs =>
@@ -1775,6 +1927,70 @@ const App = () => {
     [updateSplitState],
   );
 
+  const moveTabToSection = useCallback(
+    (tabId: string, section: Exclude<SidebarSection, 'bookmarks'>, index?: number) => {
+      setTabsBySpace(prev => {
+        const spaceTabs = prev[activeSpaceId];
+        if (!spaceTabs) return prev;
+
+        const fromIndex = spaceTabs.findIndex(tab => tab.id === tabId);
+        if (fromIndex === -1) return prev;
+
+        const working = [...spaceTabs];
+        const [tab] = working.splice(fromIndex, 1);
+        const shouldPin = section === 'pinned';
+        const updatedTab = tab.isPinned === shouldPin ? tab : { ...tab, isPinned: shouldPin };
+
+        const pinnedPositions: number[] = [];
+        const unpinnedPositions: number[] = [];
+        working.forEach((item, position) => {
+          if (item.isPinned) {
+            pinnedPositions.push(position);
+          } else {
+            unpinnedPositions.push(position);
+          }
+        });
+
+        let insertIndex: number;
+        if (section === 'pinned') {
+          if (typeof index === 'number') {
+            if (index < 0) {
+              insertIndex = 0;
+            } else if (index < pinnedPositions.length) {
+              insertIndex = pinnedPositions[index];
+            } else {
+              const lastPinned = pinnedPositions[pinnedPositions.length - 1];
+              insertIndex = lastPinned != null ? lastPinned + 1 : 0;
+            }
+          } else {
+            const lastPinned = pinnedPositions[pinnedPositions.length - 1];
+            insertIndex = lastPinned != null ? lastPinned + 1 : 0;
+          }
+        } else {
+          if (typeof index === 'number') {
+            if (index < 0) {
+              const firstUnpinned = unpinnedPositions[0];
+              insertIndex = firstUnpinned ?? working.length;
+            } else if (index < unpinnedPositions.length) {
+              insertIndex = unpinnedPositions[index];
+            } else {
+              insertIndex = working.length;
+            }
+          } else {
+            insertIndex = working.length;
+          }
+        }
+
+        working.splice(insertIndex, 0, updatedTab);
+
+        const next = { ...prev, [activeSpaceId]: working };
+        reconcileSplitState(activeSpaceId, working);
+        return next;
+      });
+    },
+    [activeSpaceId, reconcileSplitState],
+  );
+
   const ensureSpaceHasActiveTab = useCallback(
     (spaceId: string) => {
       const spaceTabs = tabsBySpace[spaceId] ?? [];
@@ -1969,25 +2185,6 @@ const App = () => {
       }
     },
     [activateSpace, homePageUrl, reconcileSplitState, reorderTabs],
-  );
-
-  const reorderTabsInSpace = useCallback(
-    (spaceId: string, fromIndex: number, toIndex: number) => {
-      setTabsBySpace(prev => {
-        const spaceTabs = prev[spaceId];
-        if (!spaceTabs || fromIndex === toIndex) return prev;
-
-        const newTabs = [...spaceTabs];
-        const [movedTab] = newTabs.splice(fromIndex, 1);
-        newTabs.splice(toIndex, 0, movedTab);
-
-        return {
-          ...prev,
-          [spaceId]: newTabs,
-        };
-      });
-    },
-    [],
   );
 
   const toggleSplitView = useCallback(() => {
@@ -2701,6 +2898,83 @@ const App = () => {
       });
     },
     [activeSpaceId, allTabs, homePageUrl, pushClosedTab, reconcileSplitState, updateSplitState, updateTabsForSpace],
+  );
+
+  const handleSectionDrop = useCallback(
+    (event: ReactDragEvent<HTMLElement>, section: SidebarSection, index?: number) => {
+      const payload = getSidebarDragPayload(event);
+      const currentDropPosition = dropPosition;
+      setDraggedItem(null);
+      setDragOverItemId(null);
+      setDragOverSection(null);
+      setDropPosition(null);
+      if (!payload || !allowDropOnSection(payload, section)) {
+        return;
+      }
+
+      event.preventDefault();
+      event.stopPropagation();
+
+      if (section === 'bookmarks') {
+        if (payload.type !== 'tab') {
+          return;
+        }
+        const tab = allTabs.find(item => item.id === payload.id);
+        if (!tab || !tab.url) {
+          return;
+        }
+        if (!isBookmarked(tab.url)) {
+          addBookmark(tab.url, tab.title, tab.favicon);
+        }
+        closeTab(tab.id);
+        return;
+      }
+
+      // Use dropPosition if available, otherwise fall back to index
+      let targetIndex = typeof index === 'number' ? index : undefined;
+      if (currentDropPosition && payload.type === 'tab') {
+        // Adjust target index based on drop position (before/after)
+        targetIndex = currentDropPosition.position === 'before'
+          ? currentDropPosition.index
+          : currentDropPosition.index + 1;
+      }
+
+      if (payload.type === 'tab') {
+        moveTabToSection(payload.id, section, targetIndex);
+        return;
+      }
+
+      const bookmark = bookmarkDatabase.bookmarks.get(payload.id);
+      if (!bookmark) {
+        return;
+      }
+
+      const insertIndex = computeInsertIndex(section, targetIndex);
+      createTab({
+        url: bookmark.url,
+        title: bookmark.title,
+        makeActive: false,
+        initialState: {
+          isPinned: section === 'pinned',
+          favicon: bookmark.favicon,
+        },
+        insertIndex,
+      });
+      removeBookmark(bookmark.id);
+    },
+    [
+      addBookmark,
+      allTabs,
+      allowDropOnSection,
+      bookmarkDatabase.bookmarks,
+      closeTab,
+      computeInsertIndex,
+      createTab,
+      dropPosition,
+      isBookmarked,
+      moveTabToSection,
+      removeBookmark,
+    ],
   );
 
   // Profile management functions
@@ -3574,7 +3848,8 @@ const App = () => {
 
       const handleConsoleMessage = (event: Electron.ConsoleMessageEvent) => {
         const { message } = event;
-        // Check if this is our special console message
+
+        // Check if this is our special console message for new tabs
         if (message.startsWith('[SYLPH_OPEN_NEW_TAB]')) {
           const url = message.replace('[SYLPH_OPEN_NEW_TAB]', '').trim();
           if (url) {
@@ -3588,6 +3863,26 @@ const App = () => {
         }
       };
 
+      const handleContextMenu = (event: any) => {
+        console.log('[Context Menu] Event triggered:', event);
+        const params = event.params as Electron.ContextMenuParams;
+        console.log('[Context Menu] Params:', params);
+
+        // Show native context menu through main process
+        if (window.sylph?.showWebviewContextMenu) {
+          console.log('[Context Menu] Showing menu...');
+          void window.sylph.showWebviewContextMenu({
+            params,
+            webContentsId: webview.getWebContentsId(),
+            tabId,
+          }).catch(err => {
+            console.error('[Context Menu] Error:', err);
+          });
+        } else {
+          console.error('[Context Menu] showWebviewContextMenu not available');
+        }
+      };
+
       webview.addEventListener('did-navigate', handleDidNavigate);
       webview.addEventListener('did-navigate-in-page', handleDidNavigateInPage);
       webview.addEventListener('page-title-updated', handleTitleUpdated);
@@ -3598,6 +3893,7 @@ const App = () => {
       webview.addEventListener('dom-ready', handleDomReady);
       webview.addEventListener('new-window', handleNewWindow);
       webview.addEventListener('console-message', handleConsoleMessage);
+      webview.addEventListener('context-menu', handleContextMenu);
 
       return () => {
         webview.removeEventListener('did-navigate', handleDidNavigate);
@@ -3610,9 +3906,10 @@ const App = () => {
         webview.removeEventListener('dom-ready', handleDomReady);
         webview.removeEventListener('new-window', handleNewWindow);
         webview.removeEventListener('console-message', handleConsoleMessage);
+        webview.removeEventListener('context-menu', handleContextMenu);
       };
     },
-    [addToHistory, applyPassGuardToTab, createTab, passGuardSettings, setAddressValue, updateTabById],
+    [addToHistory, applyPassGuardToTab, createTab, passGuardSettings, setAddressValue, setSummaryPopup, updateTabById],
   );
 
   const handleWebviewRef = useCallback(
@@ -3665,6 +3962,133 @@ const App = () => {
       webviewListenersRef.current.clear();
       webviewsRef.current.clear();
     };
+  }, []);
+
+  useEffect(() => {
+    if (!window.sylph?.onWebviewContextMenuAction) return;
+
+    const unsubscribe = window.sylph.onWebviewContextMenuAction(({ action, webContentsId, url }) => {
+      if (!window.sylph?.content) return;
+
+      if (action === 'summarize-page') {
+        setSummaryPopup({
+          x: 100,
+          y: 100,
+          content: '',
+          isLoading: true,
+        });
+
+        const webview = Array.from(webviewsRef.current.values()).find(
+          wv => wv.getWebContentsId() === webContentsId
+        );
+        const currentUrl = webview?.getURL() || '';
+
+        void window.sylph.content.summarizePage({
+          webContentsId,
+          url: currentUrl,
+        }).then(result => {
+          if (result.success && result.summary) {
+            setSummaryPopup({
+              x: 100,
+              y: 100,
+              content: result.summary,
+              isLoading: false,
+            });
+          } else {
+            setSummaryPopup({
+              x: 100,
+              y: 100,
+              content: result.error || 'Failed to summarize',
+              isLoading: false,
+            });
+          }
+        }).catch(error => {
+          setSummaryPopup({
+            x: 100,
+            y: 100,
+            content: error instanceof Error ? error.message : 'Error',
+            isLoading: false,
+          });
+        });
+      } else if (action === 'translate-page') {
+        setSummaryPopup({
+          x: 100,
+          y: 100,
+          content: '',
+          isLoading: true,
+        });
+
+        const webview = Array.from(webviewsRef.current.values()).find(
+          wv => wv.getWebContentsId() === webContentsId
+        );
+        const currentUrl = webview?.getURL() || '';
+
+        void window.sylph.content.translatePage({
+          webContentsId,
+          url: currentUrl,
+          targetLang: 'ko',
+        }).then(result => {
+          if (result.success && result.translation) {
+            setSummaryPopup({
+              x: 100,
+              y: 100,
+              content: result.translation,
+              isLoading: false,
+            });
+          } else {
+            setSummaryPopup({
+              x: 100,
+              y: 100,
+              content: result.error || 'Failed to translate',
+              isLoading: false,
+            });
+          }
+        }).catch(error => {
+          setSummaryPopup({
+            x: 100,
+            y: 100,
+            content: error instanceof Error ? error.message : 'Error',
+            isLoading: false,
+          });
+        });
+      } else if (action === 'preview-url' && url) {
+        setSummaryPopup({
+          x: 100,
+          y: 100,
+          content: '',
+          isLoading: true,
+        });
+
+        void window.sylph.content.summarizeUrl({
+          url,
+        }).then(result => {
+          if (result.success && result.summary) {
+            setSummaryPopup({
+              x: 100,
+              y: 100,
+              content: result.summary,
+              isLoading: false,
+            });
+          } else {
+            setSummaryPopup({
+              x: 100,
+              y: 100,
+              content: result.error || 'Failed to preview',
+              isLoading: false,
+            });
+          }
+        }).catch(error => {
+          setSummaryPopup({
+            x: 100,
+            y: 100,
+            content: error instanceof Error ? error.message : 'Error',
+            isLoading: false,
+          });
+        });
+      }
+    });
+
+    return unsubscribe;
   }, []);
 
   useEffect(() => {
@@ -5271,10 +5695,9 @@ const App = () => {
             + Add space
           </button>
         </div>
-
         <div className="sidebar__section">
           <div
-            className="sidebar__section-label"
+            className={`sidebar__section-label${dragOverSection === 'bookmarks' ? ' is-drop-target' : ''}`}
             onClick={() => {
               setCollapsedSections(prev => {
                 const next = new Set(prev);
@@ -5287,38 +5710,47 @@ const App = () => {
               });
             }}
             style={{ cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '8px' }}
+            onDragOver={event => {
+              const payload = handleSectionDragOver(event, 'bookmarks');
+              if (payload) {
+                setDragOverItemId(null);
+              }
+            }}
+            onDragLeave={event => handleSectionDragLeave(event, 'bookmarks')}
+            onDrop={event => handleSectionDrop(event, 'bookmarks')}
           >
             <span style={{ fontSize: '12px' }}>{collapsedSections.has('bookmarks') ? '▶' : '▼'}</span>
             Bookmarks
           </div>
-          {!collapsedSections.has('bookmarks') && (
-            <div className="sidebar__tab-list" style={{
-              maxHeight: bookmarkDatabase.bookmarks.size <= 5 ? `${bookmarkDatabase.bookmarks.size * 60}px` : '300px',
-              minHeight: bookmarkDatabase.bookmarks.size === 0 ? '40px' : 'auto',
-              overflowY: bookmarkDatabase.bookmarks.size > 5 ? 'auto' : 'visible'
-            }}>
-            {Array.from(bookmarkDatabase.bookmarks.values()).map(bookmark => (
-              <div
-                key={bookmark.id}
-                role="button"
-                tabIndex={0}
-                className="sidebar__tab"
-                onClick={() => {
-                  if (activeTab) {
-                    updateTabById(activeTab.id, tab => ({
-                      ...tab,
-                      url: bookmark.url,
-                      title: bookmark.title,
-                      isLoading: true,
-                      updatedAt: Date.now(),
-                    }));
-                  } else {
-                    createTab({ url: bookmark.url, title: bookmark.title });
-                  }
-                }}
-                onKeyDown={event => {
-                  if (event.key === 'Enter' || event.key === ' ') {
-                    event.preventDefault();
+          <div
+            ref={bookmarkListRef}
+            className={`sidebar__tab-list${dragOverSection === 'bookmarks' ? ' is-drop-target' : ''}`}
+            style={{
+              maxHeight: collapsedSections.has('bookmarks') ? '0px' : `${bookmarkListHeight}px`,
+              overflowY: collapsedSections.has('bookmarks') ? 'hidden' : 'visible',
+              opacity: collapsedSections.has('bookmarks') ? 0 : 1,
+              transition: 'max-height 0.2s ease, opacity 0.2s ease'
+            }}
+            onDragOver={event => {
+              const payload = handleSectionDragOver(event, 'bookmarks');
+              if (payload) {
+                setDragOverItemId(null);
+              }
+            }}
+            onDragLeave={event => handleSectionDragLeave(event, 'bookmarks')}
+            onDrop={event => handleSectionDrop(event, 'bookmarks')}
+          >
+            {bookmarkItems.map(bookmark => {
+              const isDragging = draggedItem?.type === 'bookmark' && draggedItem.id === bookmark.id;
+              const isDragOver = dragOverItemId === bookmark.id;
+              return (
+                <div
+                  key={bookmark.id}
+                  role="button"
+                  tabIndex={0}
+                  draggable
+                  className={`sidebar__tab${isDragging ? ' is-dragging' : ''}${isDragOver ? ' is-drag-over' : ''}`}
+                  onClick={() => {
                     if (activeTab) {
                       updateTabById(activeTab.id, tab => ({
                         ...tab,
@@ -5330,222 +5762,268 @@ const App = () => {
                     } else {
                       createTab({ url: bookmark.url, title: bookmark.title });
                     }
-                  }
-                }}
-              >
-                <div className="sidebar__tab-indicator" />
-                <div className="sidebar__tab-content">
-                  <div className="sidebar__tab-line">
-                    <div className="sidebar__tab-favicon" aria-hidden="true">
-                      {bookmark.favicon ? (
-                        <img
-                          src={bookmark.favicon}
-                          alt=""
-                          onError={(e) => { e.currentTarget.style.display = 'none'; }}
-                        />
-                      ) : (
-                        <span>{(bookmark.title || 'B').slice(0, 1)}</span>
-                      )}
-                    </div>
-                    <div className="sidebar__tab-title">{bookmark.title || bookmark.url}</div>
-                  </div>
-                </div>
-                <div className="sidebar__tab-actions">
-                  <button
-                    type="button"
-                    className="sidebar__tab-close"
-                    aria-label="Remove bookmark"
-                    onClick={event => {
-                      event.stopPropagation();
-                      removeBookmark(bookmark.id);
-                    }}
-                  >
-                    ×
-                  </button>
-                </div>
-              </div>
-            ))}
-            {bookmarkDatabase.bookmarks.size === 0 && (
-              <div style={{ padding: '16px', textAlign: 'center', color: 'rgba(255, 255, 255, 0.5)', fontSize: '13px' }}>
-                No bookmarks yet. Click the ★ button to bookmark a page.
-              </div>
-            )}
-            </div>
-          )}
-        </div>
-
-        <div className="sidebar__section">
-          {pinnedTabs.length > 0 && (
-            <>
-              <div
-                className="sidebar__section-label"
-                onClick={() => {
-                  setCollapsedSections(prev => {
-                    const next = new Set(prev);
-                    if (next.has('pinned')) {
-                      next.delete('pinned');
-                    } else {
-                      next.add('pinned');
+                  }}
+                  onKeyDown={event => {
+                    if (event.key === 'Enter' || event.key === ' ') {
+                      event.preventDefault();
+                      if (activeTab) {
+                        updateTabById(activeTab.id, tab => ({
+                          ...tab,
+                          url: bookmark.url,
+                          title: bookmark.title,
+                          isLoading: true,
+                          updatedAt: Date.now(),
+                        }));
+                      } else {
+                        createTab({ url: bookmark.url, title: bookmark.title });
+                      }
                     }
-                    return next;
-                  });
-                }}
-                style={{ cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '8px' }}
-              >
-                <span style={{ fontSize: '12px' }}>{collapsedSections.has('pinned') ? '▶' : '▼'}</span>
-                Pinned
-              </div>
-              {!collapsedSections.has('pinned') && (
-                <div className="sidebar__tab-list">
-                {pinnedTabs.map((tab, tabIndex) => {
-                  const isSplitMember =
-                    activeSplit.isSplit &&
-                    (activeSplit.primaryTabId === tab.id || activeSplit.secondaryTabId === tab.id);
-                  const isSplitFocus =
-                    isSplitMember &&
-                    ((activeSplit.focus === 'primary' && activeSplit.primaryTabId === tab.id) ||
-                      (activeSplit.focus === 'secondary' && activeSplit.secondaryTabId === tab.id));
-                  const isDragging = draggedTabId === tab.id;
-                  const isDragOver = dragOverTabId === tab.id;
-                  return (
-                    <div
-                      key={tab.id}
-                      role="button"
-                      tabIndex={0}
-                      draggable
-                      className={`sidebar__tab is-pinned${tab.isActive ? ' is-active' : ''}${isSplitMember ? ' is-split' : ''}${isSplitFocus ? ' is-split-focus' : ''}${isDragging ? ' is-dragging' : ''}${isDragOver ? ' is-drag-over' : ''}`}
-                      onClick={() => setActiveTab(tab.id)}
-                      onKeyDown={event => {
-                        if (event.key === 'Enter' || event.key === ' ') {
-                          event.preventDefault();
-                          setActiveTab(tab.id);
-                        }
-                      }}
-                      onContextMenu={event => {
-                        event.preventDefault();
-                        window.sylph?.requestTabContextMenu?.({
-                          tabId: tab.id,
-                          isPinned: tab.isPinned,
-                          url: tab.url,
-                          position: { x: event.pageX, y: event.pageY },
-                        });
-                      }}
-                      onDragStart={event => {
-                        setDraggedTabId(tab.id);
-                        event.dataTransfer.effectAllowed = 'move';
-                        event.dataTransfer.setData('text/plain', tab.id);
-                      }}
-                      onDragEnd={() => {
-                        setDraggedTabId(null);
-                        setDragOverTabId(null);
-                      }}
-                      onDragOver={event => {
-                        event.preventDefault();
-                        event.dataTransfer.dropEffect = 'move';
-                        if (draggedTabId && draggedTabId !== tab.id) {
-                          setDragOverTabId(tab.id);
-                        }
-                      }}
-                      onDragLeave={() => {
-                        setDragOverTabId(null);
-                      }}
-                      onDrop={event => {
-                        event.preventDefault();
-                        const draggedId = event.dataTransfer.getData('text/plain');
-                        if (draggedId && draggedId !== tab.id) {
-                          const fromIndex = tabs.findIndex(t => t.id === draggedId);
-                          const toIndex = tabIndex;
-                          if (fromIndex !== -1 && toIndex !== -1) {
-                            reorderTabsInSpace(activeSpaceId, fromIndex, toIndex);
-                          }
-                        }
-                        setDraggedTabId(null);
-                        setDragOverTabId(null);
+                  }}
+                  onDragStart={event => {
+                    setDraggedItem({ id: bookmark.id, type: 'bookmark' });
+                    setSidebarDragPayload(event, { type: 'bookmark', id: bookmark.id });
+                    setDragOverItemId(null);
+                    setDragOverSection(null);
+                  }}
+                  onDragEnd={() => {
+                    setDraggedItem(null);
+                    setDragOverItemId(null);
+                    setDragOverSection(null);
+                  }}
+                  onDragOver={event => {
+                    const payload = handleSectionDragOver(event, 'bookmarks');
+                    if (payload && payload.type === 'tab') {
+                      setDragOverItemId(bookmark.id);
+                    }
+                  }}
+                  onDragLeave={() => {
+                    setDragOverItemId(prev => (prev === bookmark.id ? null : prev));
+                  }}
+                  onDrop={event => handleSectionDrop(event, 'bookmarks')}
+                >
+                  <div className="sidebar__tab-indicator" />
+                  <div className="sidebar__tab-content">
+                    <div className="sidebar__tab-line">
+                      <div className="sidebar__tab-favicon" aria-hidden="true">
+                        {bookmark.favicon ? (
+                          <img
+                            src={bookmark.favicon}
+                            alt=""
+                            onError={(e) => {
+                              e.currentTarget.style.display = 'none';
+                            }}
+                          />
+                        ) : (
+                          <span>{(bookmark.title || 'B').slice(0, 1)}</span>
+                        )}
+                      </div>
+                      <div className="sidebar__tab-title">{bookmark.title || bookmark.url}</div>
+                    </div>
+                  </div>
+                  <div className="sidebar__tab-actions">
+                    <button
+                      type="button"
+                      className="sidebar__tab-close"
+                      aria-label="Remove bookmark"
+                      onClick={event => {
+                        event.stopPropagation();
+                        removeBookmark(bookmark.id);
                       }}
                     >
-                      <div className="sidebar__tab-indicator" />
-                      <div className="sidebar__tab-content">
-                        <div className="sidebar__tab-line">
-                          <div className="sidebar__tab-favicon" aria-hidden="true">
-                            {tab.favicon ? (
-                              <img
-                                src={tab.favicon}
-                                alt=""
-                                onError={() => handleFaviconError(tab.id)}
-                              />
-                            ) : (
-                              <span>{(tab.title || 'N').slice(0, 1)}</span>
-                            )}
-                          </div>
-                          <div className="sidebar__tab-title">{tab.title || 'New Tab'}</div>
-                        </div>
-                      </div>
-                      <div className="sidebar__tab-actions">
-                        <button
-                          type="button"
-                          className="sidebar__tab-action"
-                          title="Move to space"
-                          aria-label="Move to space"
-                          disabled={spaces.length <= 1}
-                          onClick={event => {
-                            event.stopPropagation();
-                            if (spaces.length <= 1) return;
-                            setSpaceMenuTabId(current => (current === tab.id ? null : tab.id));
-                          }}
-                        >
-                          ⋯
-                        </button>
-                        <button
-                          type="button"
-                          className="sidebar__tab-close"
-                          aria-label="Close tab"
-                          onClick={event => {
-                            event.stopPropagation();
-                            closeTab(tab.id);
-                          }}
-                        >
-                          ×
-                        </button>
-                      </div>
-                      {spaceMenuTabId === tab.id && spaces.length > 1 && (
-                        <div
-                          className="sidebar__tab-menu"
-                          role="menu"
-                          onClick={event => event.stopPropagation()}
-                        >
-                          {spaces
-                            .filter(space => space.id !== tab.spaceId)
-                            .map(space => (
-                              <button
-                                key={space.id}
-                                type="button"
-                                className="sidebar__tab-menu-item"
-                                onClick={event => {
-                                  event.stopPropagation();
-                                  setSpaceMenuTabId(null);
-                                  moveTabToSpace(tab.id, space.id, tab.isActive);
-                                }}
-                              >
-                                <span
-                                  className="sidebar__tab-menu-dot"
-                                  style={{ backgroundColor: space.color }}
-                                  aria-hidden="true"
-                                />
-                                {space.name}
-                              </button>
-                            ))}
-                        </div>
-                      )}
-                    </div>
-                  );
-                })}
+                      ×
+                    </button>
+                  </div>
                 </div>
-              )}
-            </>
+              );
+            })}
+          </div>
+
+          <div
+            className={`sidebar__section-label${dragOverSection === 'pinned' ? ' is-drop-target' : ''}`}
+            onClick={() => {
+              setCollapsedSections(prev => {
+                const next = new Set(prev);
+                if (next.has('pinned')) {
+                  next.delete('pinned');
+                } else {
+                  next.add('pinned');
+                }
+                return next;
+              });
+            }}
+            style={{ cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '8px' }}
+            onDragOver={event => {
+              const payload = handleSectionDragOver(event, 'pinned');
+              if (payload) {
+                setDragOverItemId(null);
+              }
+            }}
+            onDragLeave={event => handleSectionDragLeave(event, 'pinned')}
+            onDrop={event => handleSectionDrop(event, 'pinned')}
+          >
+            <span style={{ fontSize: '12px' }}>{collapsedSections.has('pinned') ? '▶' : '▼'}</span>
+            Pinned
+          </div>
+          {!collapsedSections.has('pinned') && (
+            <div
+              className={`sidebar__tab-list${dragOverSection === 'pinned' ? ' is-drop-target' : ''}`}
+              style={pinnedTabs.length === 0 ? { minHeight: '32px' } : undefined}
+              onDragOver={event => {
+                const payload = handleSectionDragOver(event, 'pinned');
+                if (payload) {
+                  setDragOverItemId(null);
+                }
+              }}
+              onDragLeave={event => handleSectionDragLeave(event, 'pinned')}
+              onDrop={event => handleSectionDrop(event, 'pinned', pinnedTabs.length)}
+            >
+              {pinnedTabs.map((tab, tabIndex) => {
+                const isSplitMember =
+                  activeSplit.isSplit &&
+                  (activeSplit.primaryTabId === tab.id || activeSplit.secondaryTabId === tab.id);
+                const isSplitFocus =
+                  isSplitMember &&
+                  ((activeSplit.focus === 'primary' && activeSplit.primaryTabId === tab.id) ||
+                    (activeSplit.focus === 'secondary' && activeSplit.secondaryTabId === tab.id));
+                const isDragging = draggedItem?.type === 'tab' && draggedItem.id === tab.id;
+                const isDragOver = dragOverItemId === tab.id;
+                const showDropIndicator = isDragOver && dropPosition && dropPosition.index === tabIndex;
+                return (
+                  <div
+                    key={tab.id}
+                    role="button"
+                    tabIndex={0}
+                    draggable
+                    className={`sidebar__tab is-pinned${tab.isActive ? ' is-active' : ''}${isSplitMember ? ' is-split' : ''}${isSplitFocus ? ' is-split-focus' : ''}${isDragging ? ' is-dragging' : ''}${showDropIndicator ? ' is-drag-over' : ''}`}
+                    data-drop-position={showDropIndicator ? dropPosition.position : undefined}
+                    onClick={() => setActiveTab(tab.id)}
+                    onKeyDown={event => {
+                      if (event.key === 'Enter' || event.key === ' ') {
+                        event.preventDefault();
+                        setActiveTab(tab.id);
+                      }
+                    }}
+                    onContextMenu={event => {
+                      event.preventDefault();
+                      window.sylph?.requestTabContextMenu?.({
+                        tabId: tab.id,
+                        isPinned: tab.isPinned,
+                        url: tab.url,
+                        position: { x: event.pageX, y: event.pageY },
+                      });
+                    }}
+                    onDragStart={event => {
+                      setDraggedItem({ id: tab.id, type: 'tab' });
+                      setSidebarDragPayload(event, { type: 'tab', id: tab.id });
+                      setDragOverItemId(null);
+                      setDragOverSection(null);
+                    }}
+                    onDragEnd={() => {
+                      setDraggedItem(null);
+                      setDragOverItemId(null);
+                      setDragOverSection(null);
+                      setDropPosition(null);
+                    }}
+                    onDragOver={event => {
+                      const payload = handleSectionDragOver(event, 'pinned');
+                      if (payload) {
+                        setDragOverItemId(tab.id);
+                        // Calculate drop position based on mouse Y position
+                        const rect = event.currentTarget.getBoundingClientRect();
+                        const mouseY = event.clientY - rect.top;
+                        const position = mouseY < rect.height / 2 ? 'before' : 'after';
+                        setDropPosition({ index: tabIndex, position });
+                      }
+                    }}
+                    onDragLeave={() => {
+                      setDragOverItemId(prev => (prev === tab.id ? null : prev));
+                      setDropPosition(prev => (prev && prev.index === tabIndex ? null : prev));
+                    }}
+                    onDrop={event => {
+                      handleSectionDrop(event, 'pinned', tabIndex);
+                    }}
+                  >
+                    <div className="sidebar__tab-indicator" />
+                    <div className="sidebar__tab-content">
+                      <div className="sidebar__tab-line">
+                        <div className="sidebar__tab-favicon" aria-hidden="true">
+                          {tab.favicon ? (
+                            <img
+                              src={tab.favicon}
+                              alt=""
+                              onError={() => handleFaviconError(tab.id)}
+                            />
+                          ) : (
+                            <span>{(tab.title || 'N').slice(0, 1)}</span>
+                          )}
+                        </div>
+                        <div className="sidebar__tab-title">{tab.title || 'New Tab'}</div>
+                      </div>
+                    </div>
+                    <div className="sidebar__tab-actions">
+                      <button
+                        type="button"
+                        className="sidebar__tab-action"
+                        title="Move to space"
+                        aria-label="Move to space"
+                        disabled={spaces.length <= 1}
+                        onClick={event => {
+                          event.stopPropagation();
+                          if (spaces.length <= 1) return;
+                          setSpaceMenuTabId(current => (current === tab.id ? null : tab.id));
+                        }}
+                      >
+                        ⋯
+                      </button>
+                      <button
+                        type="button"
+                        className="sidebar__tab-close"
+                        aria-label="Close tab"
+                        onClick={event => {
+                          event.stopPropagation();
+                          closeTab(tab.id);
+                        }}
+                      >
+                        ×
+                      </button>
+                    </div>
+                    {spaceMenuTabId === tab.id && spaces.length > 1 && (
+                      <div
+                        className="sidebar__tab-menu"
+                        role="menu"
+                        onClick={event => event.stopPropagation()}
+                      >
+                        {spaces
+                          .filter(space => space.id !== tab.spaceId)
+                          .map(space => (
+                            <button
+                              key={space.id}
+                              type="button"
+                              className="sidebar__tab-menu-item"
+                              onClick={event => {
+                                event.stopPropagation();
+                                setSpaceMenuTabId(null);
+                                moveTabToSpace(tab.id, space.id, tab.isActive);
+                              }}
+                            >
+                              <span
+                                className="sidebar__tab-menu-dot"
+                                style={{ backgroundColor: space.color }}
+                                aria-hidden="true"
+                              />
+                              {space.name}
+                            </button>
+                          ))}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
           )}
 
           <div
-            className="sidebar__section-label"
+            className={`sidebar__section-label${dragOverSection === 'tabs' ? ' is-drop-target' : ''}`}
             onClick={() => {
               setCollapsedSections(prev => {
                 const next = new Set(prev);
@@ -5558,166 +6036,185 @@ const App = () => {
               });
             }}
             style={{ cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '8px' }}
+            onDragOver={event => {
+              const payload = handleSectionDragOver(event, 'tabs');
+              if (payload) {
+                setDragOverItemId(null);
+              }
+            }}
+            onDragLeave={event => handleSectionDragLeave(event, 'tabs')}
+            onDrop={event => handleSectionDrop(event, 'tabs')}
           >
             <span style={{ fontSize: '12px' }}>{collapsedSections.has('tabs') ? '▶' : '▼'}</span>
             Tabs
           </div>
           {!collapsedSections.has('tabs') && (
-            <div className="sidebar__tab-list">
-            {unpinnedTabs.map((tab, tabIndex) => {
-              const isSplitMember =
-                activeSplit.isSplit &&
-                (activeSplit.primaryTabId === tab.id || activeSplit.secondaryTabId === tab.id);
-              const isSplitFocus =
-                isSplitMember &&
-                ((activeSplit.focus === 'primary' && activeSplit.primaryTabId === tab.id) ||
-                  (activeSplit.focus === 'secondary' && activeSplit.secondaryTabId === tab.id));
-              const isDragging = draggedTabId === tab.id;
-              const isDragOver = dragOverTabId === tab.id;
-              return (
-                <div
-                  key={tab.id}
-                  role="button"
-                  tabIndex={0}
-                  draggable
-                  className={`sidebar__tab${tab.isActive ? ' is-active' : ''}${isSplitMember ? ' is-split' : ''}${isSplitFocus ? ' is-split-focus' : ''}${isDragging ? ' is-dragging' : ''}${isDragOver ? ' is-drag-over' : ''}`}
-                  onClick={() => setActiveTab(tab.id)}
-                  onKeyDown={event => {
-                    if (event.key === 'Enter' || event.key === ' ') {
-                      event.preventDefault();
-                      setActiveTab(tab.id);
-                    }
-                  }}
-                  onContextMenu={event => {
-                    event.preventDefault();
-                    window.sylph?.requestTabContextMenu?.({
-                      tabId: tab.id,
-                      isPinned: tab.isPinned,
-                      url: tab.url,
-                      position: { x: event.pageX, y: event.pageY },
-                    });
-                  }}
-                  onDragStart={event => {
-                    setDraggedTabId(tab.id);
-                    event.dataTransfer.effectAllowed = 'move';
-                    event.dataTransfer.setData('text/plain', tab.id);
-                  }}
-                  onDragEnd={() => {
-                    setDraggedTabId(null);
-                    setDragOverTabId(null);
-                  }}
-                  onDragOver={event => {
-                    event.preventDefault();
-                    event.dataTransfer.dropEffect = 'move';
-                    if (draggedTabId && draggedTabId !== tab.id) {
-                      setDragOverTabId(tab.id);
-                    }
-                  }}
-                  onDragLeave={() => {
-                    setDragOverTabId(null);
-                  }}
-                  onDrop={event => {
-                    event.preventDefault();
-                    const draggedId = event.dataTransfer.getData('text/plain');
-                    if (draggedId && draggedId !== tab.id) {
-                      const fromIndex = tabs.findIndex(t => t.id === draggedId);
-                      const toIndex = tabIndex;
-                      if (fromIndex !== -1 && toIndex !== -1) {
-                        reorderTabsInSpace(activeSpaceId, fromIndex, toIndex);
+            <div
+              className={`sidebar__tab-list${dragOverSection === 'tabs' ? ' is-drop-target' : ''}`}
+              style={unpinnedTabs.length === 0 ? { minHeight: '32px' } : undefined}
+              onDragOver={event => {
+                const payload = handleSectionDragOver(event, 'tabs');
+                if (payload) {
+                  setDragOverItemId(null);
+                }
+              }}
+              onDragLeave={event => handleSectionDragLeave(event, 'tabs')}
+              onDrop={event => handleSectionDrop(event, 'tabs', unpinnedTabs.length)}
+            >
+              {unpinnedTabs.map((tab, tabIndex) => {
+                const isSplitMember =
+                  activeSplit.isSplit &&
+                  (activeSplit.primaryTabId === tab.id || activeSplit.secondaryTabId === tab.id);
+                const isSplitFocus =
+                  isSplitMember &&
+                  ((activeSplit.focus === 'primary' && activeSplit.primaryTabId === tab.id) ||
+                    (activeSplit.focus === 'secondary' && activeSplit.secondaryTabId === tab.id));
+                const isDragging = draggedItem?.type === 'tab' && draggedItem.id === tab.id;
+                const isDragOver = dragOverItemId === tab.id;
+                const showDropIndicator = isDragOver && dropPosition && dropPosition.index === tabIndex;
+                return (
+                  <div
+                    key={tab.id}
+                    role="button"
+                    tabIndex={0}
+                    draggable
+                    className={`sidebar__tab${tab.isActive ? ' is-active' : ''}${isSplitMember ? ' is-split' : ''}${isSplitFocus ? ' is-split-focus' : ''}${isDragging ? ' is-dragging' : ''}${showDropIndicator ? ' is-drag-over' : ''}`}
+                    data-drop-position={showDropIndicator ? dropPosition.position : undefined}
+                    onClick={() => setActiveTab(tab.id)}
+                    onKeyDown={event => {
+                      if (event.key === 'Enter' || event.key === ' ') {
+                        event.preventDefault();
+                        setActiveTab(tab.id);
                       }
-                    }
-                    setDraggedTabId(null);
-                    setDragOverTabId(null);
-                  }}
-                >
-                  <div className="sidebar__tab-indicator" />
-                  <div className="sidebar__tab-content">
-                    <div className="sidebar__tab-line">
-                      <div className="sidebar__tab-favicon" aria-hidden="true">
-                        {tab.favicon ? (
-                          <img
-                            src={tab.favicon}
-                            alt=""
-                            onError={() => handleFaviconError(tab.id)}
-                          />
-                        ) : (
-                          <span>{(tab.title || 'N').slice(0, 1)}</span>
-                        )}
-                      </div>
-                      <div className="sidebar__tab-title">{tab.title || 'New Tab'}</div>
-                    </div>
-                  </div>
-                  <div className="sidebar__tab-actions">
-                    {/*<button
-                      type="button"
-                      className={`sidebar__tab-action${isSplitMember ? ' is-active' : ''}`}
-                      title="Open in split view"
-                      aria-label="Open in split view"
-                      onClick={event => {
-                        event.stopPropagation();
-                        openTabInSplit(tab.id);
-                      }}
-                    >
-                      ⧉
-                    </button>*/}
-                    <button
-                      type="button"
-                      className="sidebar__tab-action"
-                      title="Move to space"
-                      aria-label="Move to space"
-                      disabled={spaces.length <= 1}
-                      onClick={event => {
-                        event.stopPropagation();
-                        if (spaces.length <= 1) return;
-                        setSpaceMenuTabId(current => (current === tab.id ? null : tab.id));
-                      }}
-                    >
-                      ⋯
-                    </button>
-                    <button
-                      type="button"
-                      className="sidebar__tab-close"
-                      aria-label="Close tab"
-                      onClick={event => {
-                        event.stopPropagation();
-                        closeTab(tab.id);
-                      }}
-                    >
-                      ×
-                    </button>
-                  </div>
-                  {spaceMenuTabId === tab.id && spaces.length > 1 && (
-                    <div
-                      className="sidebar__tab-menu"
-                      role="menu"
-                      onClick={event => event.stopPropagation()}
-                    >
-                      {spaces
-                        .filter(space => space.id !== tab.spaceId)
-                        .map(space => (
-                          <button
-                            key={space.id}
-                            type="button"
-                            className="sidebar__tab-menu-item"
-                            onClick={event => {
-                              event.stopPropagation();
-                              setSpaceMenuTabId(null);
-                              moveTabToSpace(tab.id, space.id, tab.isActive);
-                            }}
-                          >
-                            <span
-                              className="sidebar__tab-menu-dot"
-                              style={{ backgroundColor: space.color }}
-                              aria-hidden="true"
+                    }}
+                    onContextMenu={event => {
+                      event.preventDefault();
+                      window.sylph?.requestTabContextMenu?.({
+                        tabId: tab.id,
+                        isPinned: tab.isPinned,
+                        url: tab.url,
+                        position: { x: event.pageX, y: event.pageY },
+                      });
+                    }}
+                    onDragStart={event => {
+                      setDraggedItem({ id: tab.id, type: 'tab' });
+                      setSidebarDragPayload(event, { type: 'tab', id: tab.id });
+                      setDragOverItemId(null);
+                      setDragOverSection(null);
+                    }}
+                    onDragEnd={() => {
+                      setDraggedItem(null);
+                      setDragOverItemId(null);
+                      setDragOverSection(null);
+                      setDropPosition(null);
+                    }}
+                    onDragOver={event => {
+                      const payload = handleSectionDragOver(event, 'tabs');
+                      if (payload) {
+                        setDragOverItemId(tab.id);
+                        // Calculate drop position based on mouse Y position
+                        const rect = event.currentTarget.getBoundingClientRect();
+                        const mouseY = event.clientY - rect.top;
+                        const position = mouseY < rect.height / 2 ? 'before' : 'after';
+                        setDropPosition({ index: tabIndex, position });
+                      }
+                    }}
+                    onDragLeave={() => {
+                      setDragOverItemId(prev => (prev === tab.id ? null : prev));
+                      setDropPosition(prev => (prev && prev.index === tabIndex ? null : prev));
+                    }}
+                    onDrop={event => {
+                      handleSectionDrop(event, 'tabs', tabIndex);
+                    }}
+                  >
+                    <div className="sidebar__tab-indicator" />
+                    <div className="sidebar__tab-content">
+                      <div className="sidebar__tab-line">
+                        <div className="sidebar__tab-favicon" aria-hidden="true">
+                          {tab.favicon ? (
+                            <img
+                              src={tab.favicon}
+                              alt=""
+                              onError={() => handleFaviconError(tab.id)}
                             />
-                            {space.name}
-                          </button>
-                        ))}
+                          ) : (
+                            <span>{(tab.title || 'N').slice(0, 1)}</span>
+                          )}
+                        </div>
+                        <div className="sidebar__tab-title">{tab.title || 'New Tab'}</div>
+                      </div>
                     </div>
-                  )}
-                </div>
-              );
-            })}
+                    <div className="sidebar__tab-actions">
+                      {/*<button
+                        type="button"
+                        className={`sidebar__tab-action${isSplitMember ? ' is-active' : ''}`}
+                        title="Open in split view"
+                        aria-label="Open in split view"
+                        onClick={event => {
+                          event.stopPropagation();
+                          openTabInSplit(tab.id);
+                        }}
+                      >
+                        ⧉
+                      </button>*/}
+                      <button
+                        type="button"
+                        className="sidebar__tab-action"
+                        title="Move to space"
+                        aria-label="Move to space"
+                        disabled={spaces.length <= 1}
+                        onClick={event => {
+                          event.stopPropagation();
+                          if (spaces.length <= 1) return;
+                          setSpaceMenuTabId(current => (current === tab.id ? null : tab.id));
+                        }}
+                      >
+                        ⋯
+                      </button>
+                      <button
+                        type="button"
+                        className="sidebar__tab-close"
+                        aria-label="Close tab"
+                        onClick={event => {
+                          event.stopPropagation();
+                          closeTab(tab.id);
+                        }}
+                      >
+                        ×
+                      </button>
+                    </div>
+                    {spaceMenuTabId === tab.id && spaces.length > 1 && (
+                      <div
+                        className="sidebar__tab-menu"
+                        role="menu"
+                        onClick={event => event.stopPropagation()}
+                      >
+                        {spaces
+                          .filter(space => space.id !== tab.spaceId)
+                          .map(space => (
+                            <button
+                              key={space.id}
+                              type="button"
+                              className="sidebar__tab-menu-item"
+                              onClick={event => {
+                                event.stopPropagation();
+                                setSpaceMenuTabId(null);
+                                moveTabToSpace(tab.id, space.id, tab.isActive);
+                              }}
+                            >
+                              <span
+                                className="sidebar__tab-menu-dot"
+                                style={{ backgroundColor: space.color }}
+                                aria-hidden="true"
+                              />
+                              {space.name}
+                            </button>
+                          ))}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
             </div>
           )}
         </div>
@@ -7000,6 +7497,67 @@ const App = () => {
               <div style={{ padding: '16px', textAlign: 'center', color: 'rgba(255, 255, 255, 0.5)', fontSize: '13px' }}>
                 No history available
               </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {summaryPopup && (
+        <div
+          className="summary-popup"
+          style={{
+            position: 'fixed',
+            left: `${summaryPopup.x}px`,
+            top: `${summaryPopup.y}px`,
+            background: 'rgba(20, 30, 22, 0.98)',
+            border: '1px solid rgba(79, 178, 118, 0.3)',
+            borderRadius: '8px',
+            padding: '16px',
+            maxWidth: '400px',
+            maxHeight: '300px',
+            overflowY: 'auto',
+            boxShadow: '0 8px 24px rgba(0, 0, 0, 0.4)',
+            zIndex: 10000,
+            color: 'rgba(255, 255, 255, 0.9)',
+            fontSize: '14px',
+            lineHeight: '1.6',
+          }}
+          onClick={(e) => e.stopPropagation()}
+        >
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '12px' }}>
+            <div style={{ fontWeight: '600', color: 'var(--color-green-200)' }}>
+              {summaryPopup.isLoading ? 'Loading...' : 'Summary'}
+            </div>
+            <button
+              onClick={() => setSummaryPopup(null)}
+              style={{
+                background: 'none',
+                border: 'none',
+                color: 'rgba(255, 255, 255, 0.6)',
+                cursor: 'pointer',
+                fontSize: '20px',
+                padding: '0',
+                lineHeight: '1',
+              }}
+            >
+              ×
+            </button>
+          </div>
+          <div style={{ whiteSpace: 'pre-wrap' }}>
+            {summaryPopup.isLoading ? (
+              <div style={{ textAlign: 'center', padding: '20px' }}>
+                <div className="spinner" style={{
+                  width: '24px',
+                  height: '24px',
+                  border: '3px solid rgba(79, 178, 118, 0.3)',
+                  borderTopColor: 'var(--color-green-400)',
+                  borderRadius: '50%',
+                  animation: 'spin 0.8s linear infinite',
+                  margin: '0 auto',
+                }} />
+              </div>
+            ) : (
+              summaryPopup.content
             )}
           </div>
         </div>
