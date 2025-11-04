@@ -69,6 +69,15 @@ const api = {
       ipcRenderer.removeListener('tab-action', listener);
     };
   },
+  onWebviewAction: (handler: (payload: { url: string }) => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, payload: { url: string }) => {
+      handler(payload);
+    };
+    ipcRenderer.on('webview:open-link-in-new-tab', listener);
+    return () => {
+      ipcRenderer.removeListener('webview:open-link-in-new-tab', listener);
+    };
+  },
   settings: {
     getApiKey: () => ipcRenderer.invoke('settings:get-api-key') as Promise<string | null>,
     setApiKey: (key: string | null) => ipcRenderer.invoke('settings:set-api-key', { key }),

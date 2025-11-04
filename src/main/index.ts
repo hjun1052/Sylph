@@ -788,7 +788,32 @@ const setupWebviewContextMenus = () => {
         ? [{ role: 'paste' as const }]
         : [];
 
+      const linkItems: MenuItemConstructorOptions[] = params.linkURL
+        ? [
+            {
+              label: 'Open Link in New Tab',
+              click: () => {
+                if (parentWebContents && !parentWebContents.isDestroyed()) {
+                  parentWebContents.send('webview:open-link-in-new-tab', {
+                    url: params.linkURL,
+                  });
+                }
+              },
+            },
+            { type: 'separator' },
+            {
+              label: 'Copy Link Address',
+              click: () => {
+                const { clipboard } = require('electron');
+                clipboard.writeText(params.linkURL);
+              },
+            },
+            { type: 'separator' },
+          ]
+        : [];
+
       const template: MenuItemConstructorOptions[] = [
+        ...linkItems,
         {
           label: 'Back',
           enabled: contents.canGoBack(),
@@ -1040,6 +1065,11 @@ const requestTabContextMenu = (
     {
       label: 'Duplicate Tab',
       click: () => sendTabAction('duplicate'),
+    },
+    {
+      label: 'Open in New Tab',
+      enabled: !!payload.url,
+      click: () => sendTabAction('open-in-new-tab'),
     },
     { type: 'separator' },
     {

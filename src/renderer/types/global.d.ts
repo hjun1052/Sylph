@@ -22,6 +22,7 @@ declare global {
     sylph?: {
       onAppAction: (handler: (payload: { action: string }) => void) => () => void;
       onTabAction: (handler: (payload: { action: string; tabId: string }) => void) => () => void;
+      onWebviewAction: (handler: (payload: { url: string }) => void) => () => void;
       requestTabContextMenu: (payload: {
         tabId: string;
         isPinned?: boolean;
@@ -116,9 +117,67 @@ declare global {
         addTab: (webContentsId: number) => Promise<void>;
         selectTab: (webContentsId: number) => Promise<void>;
       };
+      content?: {
+        captureScreenshot: (payload: { webContentsId: number; format?: 'png' | 'jpeg' }) => Promise<{
+          success: boolean;
+          dataUrl?: string;
+          error?: string;
+        }>;
+        savePage: (payload: { webContentsId: number }) => Promise<{
+          success: boolean;
+          path?: string;
+          error?: string;
+        }>;
+        print: (payload: { webContentsId: number }) => Promise<{
+          success: boolean;
+          error?: string;
+        }>;
+        toggleFullscreen: (payload: { webContentsId: number }) => Promise<{
+          success: boolean;
+          isFullscreen: boolean;
+        }>;
+        summarizePage: (payload: { webContentsId: number; url: string }) => Promise<{
+          success: boolean;
+          summary?: string;
+          error?: string;
+        }>;
+        translatePage: (payload: { webContentsId: number; url: string; targetLang?: string }) => Promise<{
+          success: boolean;
+          translation?: string;
+          error?: string;
+        }>;
+        summarizeUrl: (payload: { url: string }) => Promise<{
+          success: boolean;
+          summary?: string;
+          error?: string;
+        }>;
+      };
+      downloads?: {
+        onDownloadStarted: (handler: (item: DownloadItemInfo) => void) => () => void;
+        onDownloadProgress: (handler: (item: DownloadItemInfo) => void) => () => void;
+        onDownloadCompleted: (handler: (item: DownloadItemInfo) => void) => () => void;
+        pauseDownload: (payload: { id: string }) => Promise<{ success: boolean }>;
+        resumeDownload: (payload: { id: string }) => Promise<{ success: boolean }>;
+        cancelDownload: (payload: { id: string }) => Promise<{ success: boolean }>;
+        openDownload: (payload: { path: string }) => Promise<{ success: boolean }>;
+        showInFolder: (payload: { path: string }) => Promise<{ success: boolean }>;
+      };
     };
   }
 }
+
+type DownloadItemInfo = {
+  id: string;
+  filename: string;
+  url: string;
+  savePath: string;
+  totalBytes: number;
+  receivedBytes: number;
+  state: 'progressing' | 'completed' | 'cancelled' | 'interrupted';
+  isPaused: boolean;
+  canResume: boolean;
+  mimeType?: string;
+};
 import type {
   AetherAutomationEvent,
   AetherAutomationRun,

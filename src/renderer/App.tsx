@@ -35,6 +35,7 @@ import type {
 import { v4 as uuidv4 } from 'uuid';
 import { PassGuardUserOverride, Tab, TabAIContext, TabAIMessage, TabPassGuardState } from './types/tab';
 import { HistoryEntry, HistoryDatabase, MAX_HISTORY_ENTRIES, HISTORY_CLEANUP_INTERVAL, HISTORY_STORAGE_KEY } from './types/history';
+import { Bookmark, BookmarkFolder, BookmarkDatabase, BOOKMARKS_STORAGE_KEY, DEFAULT_FOLDER_ID } from './types/bookmark';
 import { ArchivedTab, ArchiveSettings, DEFAULT_ARCHIVE_SETTINGS, ARCHIVE_STORAGE_KEY, ARCHIVE_SETTINGS_STORAGE_KEY } from './types/archive';
 import { Profile, DEFAULT_PROFILE_ID, createDefaultProfile, createIncognitoProfile, PROFILES_STORAGE_KEY } from './types/profile';
 import { marked } from 'marked';
@@ -896,6 +897,9 @@ const App = () => {
   const [editedProfileName, setEditedProfileName] = useState('');
   const [editedProfileColor, setEditedProfileColor] = useState('');
   const [profileToDelete, setProfileToDelete] = useState<Profile | null>(null);
+  const [isHistoryMenuOpen, setIsHistoryMenuOpen] = useState(false);
+  const [historyMenuType, setHistoryMenuType] = useState<'back' | 'forward' | null>(null);
+  const [historyMenuPosition, setHistoryMenuPosition] = useState({ x: 0, y: 0 });
 
   const webviewListenersRef = useRef<Map<string, () => void>>(new Map());
   const activeWebviewRef = useRef<WebviewTag | null>(null);
@@ -934,6 +938,33 @@ const App = () => {
     }
     return { entries: new Map(), lastCleanup: Date.now() };
   });
+  const [bookmarkDatabase, setBookmarkDatabase] = useState<BookmarkDatabase>(() => {
+    try {
+      const stored = window.localStorage?.getItem(BOOKMARKS_STORAGE_KEY);
+      if (stored) {
+        const parsed = JSON.parse(stored);
+        return {
+          bookmarks: new Map(Object.entries(parsed.bookmarks || {})),
+          folders: new Map(Object.entries(parsed.folders || {})),
+        };
+      }
+    } catch (error) {
+      console.warn('Failed to load bookmarks database', error);
+    }
+    // Initialize with default folder
+    const folders = new Map<string, BookmarkFolder>();
+    folders.set(DEFAULT_FOLDER_ID, {
+      id: DEFAULT_FOLDER_ID,
+      name: 'Bookmarks',
+      parentId: null,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    });
+    return { bookmarks: new Map(), folders };
+  });
+  const [expandedFolders, setExpandedFolders] = useState<Set<string>>(new Set([DEFAULT_FOLDER_ID]));
+  const [bookmarkSearchQuery, setBookmarkSearchQuery] = useState('');
+  const [collapsedSections, setCollapsedSections] = useState<Set<string>>(new Set());
   const [archivedTabs, setArchivedTabs] = useState<ArchivedTab[]>(() => {
     try {
       const stored = window.localStorage?.getItem(ARCHIVE_STORAGE_KEY);
@@ -1157,6 +1188,126 @@ const App = () => {
       .slice(0, limit);
     return results;
   }, [historyDatabase]);
+
+  // Bookmark management functions
+  const saveBookmarksToStorage = useCallback((db: BookmarkDatabase) => {
+    try {
+      const serialized = {
+        bookmarks: Object.fromEntries(db.bookmarks),
+        folders: Object.fromEntries(db.folders),
+      };
+      window.localStorage?.setItem(BOOKMARKS_STORAGE_KEY, JSON.stringify(serialized));
+    } catch (error) {
+      console.warn('Failed to save bookmarks database', error);
+    }
+  }, []);
+
+  const addBookmark = useCallback((url: string, title: string, favicon?: string, folderId: string | null = DEFAULT_FOLDER_ID) => {
+    const newBookmark: Bookmark = {
+      id: uuidv4(),
+      title,
+      url,
+      favicon,
+      folderId,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    };
+
+    setBookmarkDatabase(prev => {
+      const bookmarks = new Map(prev.bookmarks);
+      bookmarks.set(newBookmark.id, newBookmark);
+      const newDb = { ...prev, bookmarks };
+      saveBookmarksToStorage(newDb);
+      return newDb;
+    });
+  }, [saveBookmarksToStorage]);
+
+  const removeBookmark = useCallback((bookmarkId: string) => {
+    setBookmarkDatabase(prev => {
+      const bookmarks = new Map(prev.bookmarks);
+      bookmarks.delete(bookmarkId);
+      const newDb = { ...prev, bookmarks };
+      saveBookmarksToStorage(newDb);
+      return newDb;
+    });
+  }, [saveBookmarksToStorage]);
+
+  const updateBookmark = useCallback((bookmarkId: string, updates: Partial<Bookmark>) => {
+    setBookmarkDatabase(prev => {
+      const bookmarks = new Map(prev.bookmarks);
+      const existing = bookmarks.get(bookmarkId);
+      if (existing) {
+        bookmarks.set(bookmarkId, {
+          ...existing,
+          ...updates,
+          updatedAt: Date.now(),
+        });
+      }
+      const newDb = { ...prev, bookmarks };
+      saveBookmarksToStorage(newDb);
+      return newDb;
+    });
+  }, [saveBookmarksToStorage]);
+
+  const addBookmarkFolder = useCallback((name: string, parentId: string | null = null) => {
+    const newFolder: BookmarkFolder = {
+      id: uuidv4(),
+      name,
+      parentId,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    };
+
+    setBookmarkDatabase(prev => {
+      const folders = new Map(prev.folders);
+      folders.set(newFolder.id, newFolder);
+      const newDb = { ...prev, folders };
+      saveBookmarksToStorage(newDb);
+      return newDb;
+    });
+
+    // Auto-expand the new folder
+    setExpandedFolders(prev => new Set([...prev, newFolder.id]));
+  }, [saveBookmarksToStorage]);
+
+  const removeBookmarkFolder = useCallback((folderId: string) => {
+    setBookmarkDatabase(prev => {
+      const folders = new Map(prev.folders);
+      const bookmarks = new Map(prev.bookmarks);
+
+      // Move bookmarks in this folder to root
+      bookmarks.forEach((bookmark, id) => {
+        if (bookmark.folderId === folderId) {
+          bookmarks.set(id, { ...bookmark, folderId: DEFAULT_FOLDER_ID });
+        }
+      });
+
+      folders.delete(folderId);
+      const newDb = { bookmarks, folders };
+      saveBookmarksToStorage(newDb);
+      return newDb;
+    });
+
+    setExpandedFolders(prev => {
+      const next = new Set(prev);
+      next.delete(folderId);
+      return next;
+    });
+  }, [saveBookmarksToStorage]);
+
+  const searchBookmarks = useCallback((query: string): Bookmark[] => {
+    const lowerQuery = query.toLowerCase();
+    return Array.from(bookmarkDatabase.bookmarks.values())
+      .filter(bookmark =>
+        bookmark.url.toLowerCase().includes(lowerQuery) ||
+        bookmark.title.toLowerCase().includes(lowerQuery)
+      )
+      .sort((a, b) => b.createdAt - a.createdAt);
+  }, [bookmarkDatabase]);
+
+  const isBookmarked = useCallback((url: string): boolean => {
+    return Array.from(bookmarkDatabase.bookmarks.values()).some(b => b.url === url);
+  }, [bookmarkDatabase]);
 
   // Update address suggestions when address value changes
   useEffect(() => {
@@ -2927,6 +3078,23 @@ const App = () => {
     activeWebviewRef.current?.reload();
   };
 
+  const handleShowHistoryMenu = (event: React.MouseEvent, type: 'back' | 'forward') => {
+    event.preventDefault();
+    setHistoryMenuType(type);
+    setHistoryMenuPosition({ x: event.clientX, y: event.clientY });
+    setIsHistoryMenuOpen(true);
+  };
+
+  const handleNavigateToHistoryIndex = (offset: number) => {
+    if (!activeWebviewRef.current) return;
+    try {
+      activeWebviewRef.current.goToOffset(offset);
+    } catch (error) {
+      console.warn('Failed to navigate to history index:', error);
+    }
+    setIsHistoryMenuOpen(false);
+  };
+
   const handleManualPassGuardChange = useCallback(
     (nextActive: boolean) => {
       const tabId = activeTabIdRef.current;
@@ -3567,6 +3735,13 @@ const App = () => {
         case 'duplicate':
           duplicateTab(tabId);
           break;
+        case 'open-in-new-tab': {
+          const tab = allTabs.find(t => t.id === tabId);
+          if (tab?.url) {
+            createTab({ url: tab.url, spaceId: tab.spaceId, profileId: tab.profileId });
+          }
+          break;
+        }
         case 'close':
           closeTab(tabId);
           break;
@@ -3584,7 +3759,24 @@ const App = () => {
     return () => {
       unsubscribe?.();
     };
-  }, [closeOtherTabs, closeTab, closeTabsToRight, duplicateTab, toggleTabPin]);
+  }, [allTabs, closeOtherTabs, closeTab, closeTabsToRight, createTab, duplicateTab, toggleTabPin]);
+
+  useEffect(() => {
+    if (!window.sylph?.onWebviewAction) return;
+
+    const unsubscribe = window.sylph.onWebviewAction(({ url }) => {
+      const activeTab = tabs.find(t => t.isActive);
+      createTab({
+        url,
+        spaceId: activeTab?.spaceId ?? activeSpaceId,
+        profileId: activeTab?.profileId ?? activeProfileId
+      });
+    });
+
+    return () => {
+      unsubscribe?.();
+    };
+  }, [activeProfileId, activeSpaceId, createTab, tabs]);
 
   useEffect(() => {
     const handleKeydown = (event: KeyboardEvent) => {
@@ -5081,10 +5273,130 @@ const App = () => {
         </div>
 
         <div className="sidebar__section">
+          <div
+            className="sidebar__section-label"
+            onClick={() => {
+              setCollapsedSections(prev => {
+                const next = new Set(prev);
+                if (next.has('bookmarks')) {
+                  next.delete('bookmarks');
+                } else {
+                  next.add('bookmarks');
+                }
+                return next;
+              });
+            }}
+            style={{ cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '8px' }}
+          >
+            <span style={{ fontSize: '12px' }}>{collapsedSections.has('bookmarks') ? '▶' : '▼'}</span>
+            Bookmarks
+          </div>
+          {!collapsedSections.has('bookmarks') && (
+            <div className="sidebar__tab-list" style={{
+              maxHeight: bookmarkDatabase.bookmarks.size <= 5 ? `${bookmarkDatabase.bookmarks.size * 60}px` : '300px',
+              minHeight: bookmarkDatabase.bookmarks.size === 0 ? '40px' : 'auto',
+              overflowY: bookmarkDatabase.bookmarks.size > 5 ? 'auto' : 'visible'
+            }}>
+            {Array.from(bookmarkDatabase.bookmarks.values()).map(bookmark => (
+              <div
+                key={bookmark.id}
+                role="button"
+                tabIndex={0}
+                className="sidebar__tab"
+                onClick={() => {
+                  if (activeTab) {
+                    updateTabById(activeTab.id, tab => ({
+                      ...tab,
+                      url: bookmark.url,
+                      title: bookmark.title,
+                      isLoading: true,
+                      updatedAt: Date.now(),
+                    }));
+                  } else {
+                    createTab({ url: bookmark.url, title: bookmark.title });
+                  }
+                }}
+                onKeyDown={event => {
+                  if (event.key === 'Enter' || event.key === ' ') {
+                    event.preventDefault();
+                    if (activeTab) {
+                      updateTabById(activeTab.id, tab => ({
+                        ...tab,
+                        url: bookmark.url,
+                        title: bookmark.title,
+                        isLoading: true,
+                        updatedAt: Date.now(),
+                      }));
+                    } else {
+                      createTab({ url: bookmark.url, title: bookmark.title });
+                    }
+                  }
+                }}
+              >
+                <div className="sidebar__tab-indicator" />
+                <div className="sidebar__tab-content">
+                  <div className="sidebar__tab-line">
+                    <div className="sidebar__tab-favicon" aria-hidden="true">
+                      {bookmark.favicon ? (
+                        <img
+                          src={bookmark.favicon}
+                          alt=""
+                          onError={(e) => { e.currentTarget.style.display = 'none'; }}
+                        />
+                      ) : (
+                        <span>{(bookmark.title || 'B').slice(0, 1)}</span>
+                      )}
+                    </div>
+                    <div className="sidebar__tab-title">{bookmark.title || bookmark.url}</div>
+                  </div>
+                </div>
+                <div className="sidebar__tab-actions">
+                  <button
+                    type="button"
+                    className="sidebar__tab-close"
+                    aria-label="Remove bookmark"
+                    onClick={event => {
+                      event.stopPropagation();
+                      removeBookmark(bookmark.id);
+                    }}
+                  >
+                    ×
+                  </button>
+                </div>
+              </div>
+            ))}
+            {bookmarkDatabase.bookmarks.size === 0 && (
+              <div style={{ padding: '16px', textAlign: 'center', color: 'rgba(255, 255, 255, 0.5)', fontSize: '13px' }}>
+                No bookmarks yet. Click the ★ button to bookmark a page.
+              </div>
+            )}
+            </div>
+          )}
+        </div>
+
+        <div className="sidebar__section">
           {pinnedTabs.length > 0 && (
             <>
-              <div className="sidebar__section-label">Pinned</div>
-              <div className="sidebar__tab-list">
+              <div
+                className="sidebar__section-label"
+                onClick={() => {
+                  setCollapsedSections(prev => {
+                    const next = new Set(prev);
+                    if (next.has('pinned')) {
+                      next.delete('pinned');
+                    } else {
+                      next.add('pinned');
+                    }
+                    return next;
+                  });
+                }}
+                style={{ cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '8px' }}
+              >
+                <span style={{ fontSize: '12px' }}>{collapsedSections.has('pinned') ? '▶' : '▼'}</span>
+                Pinned
+              </div>
+              {!collapsedSections.has('pinned') && (
+                <div className="sidebar__tab-list">
                 {pinnedTabs.map((tab, tabIndex) => {
                   const isSplitMember =
                     activeSplit.isSplit &&
@@ -5227,12 +5539,31 @@ const App = () => {
                     </div>
                   );
                 })}
-              </div>
+                </div>
+              )}
             </>
           )}
 
-          <div className="sidebar__section-label">{pinnedTabs.length > 0 ? 'Tabs' : 'Tabs'}</div>
-          <div className="sidebar__tab-list">
+          <div
+            className="sidebar__section-label"
+            onClick={() => {
+              setCollapsedSections(prev => {
+                const next = new Set(prev);
+                if (next.has('tabs')) {
+                  next.delete('tabs');
+                } else {
+                  next.add('tabs');
+                }
+                return next;
+              });
+            }}
+            style={{ cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '8px' }}
+          >
+            <span style={{ fontSize: '12px' }}>{collapsedSections.has('tabs') ? '▶' : '▼'}</span>
+            Tabs
+          </div>
+          {!collapsedSections.has('tabs') && (
+            <div className="sidebar__tab-list">
             {unpinnedTabs.map((tab, tabIndex) => {
               const isSplitMember =
                 activeSplit.isSplit &&
@@ -5387,7 +5718,8 @@ const App = () => {
                 </div>
               );
             })}
-          </div>
+            </div>
+          )}
         </div>
         <div className="sidebar__footer">
           <button
@@ -5419,6 +5751,28 @@ const App = () => {
               onChange={event => setAddressValue(event.target.value)}
               onKeyDown={handleAddressKeyDown}
             />
+            {activeTab && activeTab.url && (
+              <button
+                className="main-toolbar__bookmark-button"
+                type="button"
+                onClick={() => {
+                  if (isBookmarked(activeTab.url)) {
+                    const bookmark = Array.from(bookmarkDatabase.bookmarks.values()).find(b => b.url === activeTab.url);
+                    if (bookmark) {
+                      removeBookmark(bookmark.id);
+                    }
+                  } else {
+                    addBookmark(activeTab.url, activeTab.title, activeTab.favicon);
+                  }
+                }}
+                title={isBookmarked(activeTab.url) ? 'Remove bookmark' : 'Add bookmark'}
+                style={{
+                  color: isBookmarked(activeTab.url) ? 'var(--color-green-400)' : 'rgba(255, 255, 255, 0.5)',
+                }}
+              >
+                ★
+              </button>
+            )}
             {addressSuggestions.length > 0 && isAddressFocused && (
               <div className="address-suggestions">
                 {addressSuggestions.map((suggestion, index) => (
@@ -5470,6 +5824,7 @@ const App = () => {
               className="main-toolbar__button"
               type="button"
               onClick={handleGoBack}
+              onContextMenu={(e) => handleShowHistoryMenu(e, 'back')}
               disabled={!activeTab?.canGoBack}
             >
               〈
@@ -5478,6 +5833,7 @@ const App = () => {
               className="main-toolbar__button"
               type="button"
               onClick={handleGoForward}
+              onContextMenu={(e) => handleShowHistoryMenu(e, 'forward')}
               disabled={!activeTab?.canGoForward}
             >
               〉
@@ -5525,33 +5881,17 @@ const App = () => {
               >
                 ⧉
               </button>
-              <button
-                className="main-toolbar__button"
-                type="button"
-                onClick={() => focusSplitPane('primary')}
-                title="Focus left pane"
-                disabled={!activeSplit.isSplit || !primaryTab}
-              >
-                ◧
-              </button>
-              <button
-                className="main-toolbar__button"
-                type="button"
-                onClick={() => focusSplitPane('secondary')}
-                title="Focus right pane"
-                disabled={!activeSplit.isSplit || !secondaryTab}
-              >
-                ◨
-              </button>
-              <button
-                className="main-toolbar__button"
-                type="button"
-                onClick={swapSplitPanes}
-                title="Swap panes"
-                disabled={!activeSplit.isSplit || !primaryTab || !secondaryTab}
-              >
-                ⇆
-              </button>
+              <div className="main-toolbar__split-submenu">
+                <button
+                  className="main-toolbar__button"
+                  type="button"
+                  onClick={swapSplitPanes}
+                  title="Swap panes"
+                  disabled={!primaryTab || !secondaryTab}
+                >
+                  ⇆
+                </button>
+              </div>
             </div>
             <span className="main-toolbar__divider" aria-hidden="true" />
             <div className="profile-menu">
@@ -5711,18 +6051,30 @@ const App = () => {
             const profile = profiles.find(p => p.id === tab.profileId);
             const partition = profile?.partition || 'persist:sylph';
 
+            const handlePaneClick = () => {
+              if (activeSplit.isSplit && (pane === 'primary' || pane === 'secondary')) {
+                focusSplitPane(pane);
+              }
+            };
+
             return (
-              <webview
+              <div
                 key={tab.id}
-                ref={element => handleWebviewRef(tab.id, element)}
-                src={tab.url || homePageUrl || DEFAULT_HOME_URL}
-                partition={partition}
-                useragent={DEFAULT_USER_AGENT}
-                allowpopups={true}
-                webpreferences="nativeWindowOpen=no"
+                className="browser-view__pane-wrapper"
                 data-pane={pane}
-                data-active={tab.isActive ? 'true' : 'false'}
-              />
+                onClick={handlePaneClick}
+              >
+                <webview
+                  ref={element => handleWebviewRef(tab.id, element)}
+                  src={tab.url || homePageUrl || DEFAULT_HOME_URL}
+                  partition={partition}
+                  useragent={DEFAULT_USER_AGENT}
+                  allowpopups={true}
+                  webpreferences="nativeWindowOpen=no"
+                  data-pane={pane}
+                  data-active={tab.isActive ? 'true' : 'false'}
+                />
+              </div>
             );
           })}
 
@@ -6552,6 +6904,103 @@ const App = () => {
                 Delete
               </button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* History Navigation Menu */}
+      {isHistoryMenuOpen && activeTab && (
+        <div
+          style={{
+            position: 'fixed',
+            top: 0,
+            left: 0,
+            right: 0,
+            bottom: 0,
+            zIndex: 10000,
+          }}
+          onClick={() => setIsHistoryMenuOpen(false)}
+        >
+          <div
+            style={{
+              position: 'absolute',
+              top: historyMenuPosition.y,
+              left: historyMenuPosition.x,
+              background: 'rgba(15, 35, 25, 0.98)',
+              border: '1px solid rgba(79, 178, 118, 0.3)',
+              borderRadius: '8px',
+              padding: '8px',
+              minWidth: '250px',
+              maxWidth: '400px',
+              maxHeight: '400px',
+              overflowY: 'auto',
+              boxShadow: '0 8px 24px rgba(0, 0, 0, 0.4)',
+            }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div style={{ padding: '8px', fontWeight: 'bold', fontSize: '12px', color: 'rgba(255, 255, 255, 0.6)', borderBottom: '1px solid rgba(79, 178, 118, 0.2)' }}>
+              {historyMenuType === 'back' ? 'Back History' : 'Forward History'}
+            </div>
+            {activeTab.history && activeTab.history.length > 0 ? (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', marginTop: '4px' }}>
+                {(historyMenuType === 'back'
+                  ? activeTab.history.slice(0, 10)
+                  : activeTab.history.slice(-10)
+                ).map((url, index) => {
+                  const historyEntry = historyDatabase.entries.get(url);
+                  const offset = historyMenuType === 'back' ? -(index + 1) : (index + 1);
+
+                  return (
+                    <button
+                      key={`${url}-${index}`}
+                      type="button"
+                      style={{
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: '8px',
+                        padding: '8px 12px',
+                        background: 'transparent',
+                        border: 'none',
+                        borderRadius: '4px',
+                        color: 'rgba(255, 255, 255, 0.9)',
+                        cursor: 'pointer',
+                        textAlign: 'left',
+                        transition: 'background 0.2s',
+                        fontSize: '13px',
+                      }}
+                      onMouseEnter={(e) => {
+                        e.currentTarget.style.background = 'rgba(79, 178, 118, 0.15)';
+                      }}
+                      onMouseLeave={(e) => {
+                        e.currentTarget.style.background = 'transparent';
+                      }}
+                      onClick={() => handleNavigateToHistoryIndex(offset)}
+                    >
+                      {historyEntry?.favicon && (
+                        <img
+                          src={historyEntry.favicon}
+                          alt=""
+                          style={{ width: '16px', height: '16px', flexShrink: 0 }}
+                          onError={(e) => { e.currentTarget.style.display = 'none'; }}
+                        />
+                      )}
+                      <div style={{ flex: 1, overflow: 'hidden' }}>
+                        <div style={{ fontSize: '13px', fontWeight: '500', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                          {historyEntry?.title || url}
+                        </div>
+                        <div style={{ fontSize: '11px', color: 'rgba(255, 255, 255, 0.5)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                          {url}
+                        </div>
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
+            ) : (
+              <div style={{ padding: '16px', textAlign: 'center', color: 'rgba(255, 255, 255, 0.5)', fontSize: '13px' }}>
+                No history available
+              </div>
+            )}
           </div>
         </div>
       )}
