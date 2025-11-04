@@ -589,6 +589,7 @@ const createTabState = (overrides: Partial<Tab> = {}): Tab => ({
   url: overrides.url ?? '',
   favicon: overrides.favicon ?? '',
   spaceId: overrides.spaceId ?? DEFAULT_SPACE_ID,
+  profileId: overrides.profileId,
   isActive: overrides.isActive ?? false,
   isLoading: overrides.isLoading ?? false,
   isCrashed: overrides.isCrashed ?? false,
@@ -891,6 +892,10 @@ const App = () => {
   const [isProfileMenuOpen, setIsProfileMenuOpen] = useState(false);
   const [isAddProfileModalOpen, setIsAddProfileModalOpen] = useState(false);
   const [newProfileName, setNewProfileName] = useState('');
+  const [editingProfile, setEditingProfile] = useState<Profile | null>(null);
+  const [editedProfileName, setEditedProfileName] = useState('');
+  const [editedProfileColor, setEditedProfileColor] = useState('');
+  const [profileToDelete, setProfileToDelete] = useState<Profile | null>(null);
 
   const webviewListenersRef = useRef<Map<string, () => void>>(new Map());
   const activeWebviewRef = useRef<WebviewTag | null>(null);
@@ -981,8 +986,13 @@ const App = () => {
   // Filter tabs by current window's profile
   const tabs = useMemo(() => {
     const spaceTabs = tabsBySpace[activeSpaceId] ?? [];
-    return spaceTabs.filter(tab => (tab.profileId || DEFAULT_PROFILE_ID) === activeProfileId);
+    const filtered = spaceTabs.filter(tab => (tab.profileId || DEFAULT_PROFILE_ID) === activeProfileId);
+    console.log('[tabs filter] activeSpaceId:', activeSpaceId, 'activeProfileId:', activeProfileId, 'spaceTabs:', spaceTabs.length, 'filtered:', filtered.length, 'tabs:', spaceTabs.map(t => ({ id: t.id.slice(0, 8), profileId: t.profileId, title: t.title })));
+    return filtered;
   }, [tabsBySpace, activeSpaceId, activeProfileId]);
+
+  const pinnedTabs = useMemo(() => tabs.filter(tab => tab.isPinned), [tabs]);
+  const unpinnedTabs = useMemo(() => tabs.filter(tab => !tab.isPinned), [tabs]);
 
   const allTabs = useMemo(
     () => Object.values(tabsBySpace).flatMap(spaceTabs =>
@@ -2413,10 +2423,14 @@ const App = () => {
 
     // Determine profileId and check if it's incognito
     const tabProfileId = options?.profileId ?? initial.profileId ?? activeProfileId;
+    console.log('[createTab] activeProfileId:', activeProfileId, 'tabProfileId:', tabProfileId, 'options:', options);
     const profile = profiles.find(p => p.id === tabProfileId);
     const isIncognitoProfile = profile?.isIncognito ?? false;
 
-    const url = options?.url ?? initial.url ?? (isIncognitoProfile ? 'incognito.html' : resolvedHomeUrl) ?? '';
+    const incognitoUrl = typeof window !== 'undefined' && window.location.protocol === 'http:'
+      ? `${window.location.protocol}//${window.location.host}/incognito_page/index.html`
+      : 'incognito_page/index.html';
+    const url = options?.url ?? initial.url ?? (isIncognitoProfile ? incognitoUrl : resolvedHomeUrl) ?? '';
     const title =
       options?.title ??
       initial.title ??
@@ -2473,24 +2487,27 @@ const App = () => {
     return nextTab.id;
   }, [activeSpaceId, activeProfileId, profiles, getSplitState, homePageUrl, reconcileSplitState, updateSplitState, updateTabsForSpace]);
 
-  // Initialize profile window with a tab if it's a new incognito profile
-  const hasInitialized = useRef(false);
+  // Initialize profile window with a tab if there are no tabs for this profile
+  // Track initialization per profile, not globally
+  const initializedProfiles = useRef(new Set<string>());
   useEffect(() => {
-    if (hasInitialized.current) return;
+    // Skip if already initialized for this profile
+    if (initializedProfiles.current.has(activeProfileId)) return;
 
-    const currentProfile = profiles.find(p => p.id === activeProfileId);
-    if (!currentProfile) return;
+    // Check if there are any tabs for the current profile
+    if (tabs.length === 0) {
+      const currentProfile = profiles.find(p => p.id === activeProfileId);
 
-    // Only auto-create tab if this is an incognito profile and there are no tabs
-    if (currentProfile.isIncognito && tabs.length === 0) {
+      console.log('[Profile Init] Creating initial tab for profile:', activeProfileId, currentProfile?.name);
+
+      // Create initial tab (incognito.html for incognito profiles, default for others)
       createTab({
-        url: 'incognito.html',
-        title: 'New Incognito Tab',
         makeActive: true,
         profileId: activeProfileId,
-        incognito: true,
+        incognito: currentProfile?.isIncognito,
       });
-      hasInitialized.current = true;
+
+      initializedProfiles.current.add(activeProfileId);
     }
   }, [activeProfileId, profiles, tabs, createTab]);
 
@@ -2547,6 +2564,14 @@ const App = () => {
     };
     setProfiles(prev => [...prev, newProfile]);
     return newProfile;
+  }, []);
+
+  const updateProfile = useCallback((profileId: string, updates: Partial<Pick<Profile, 'name' | 'color' | 'icon'>>) => {
+    if (profileId === DEFAULT_PROFILE_ID && updates.name) {
+      console.warn('Cannot rename default profile');
+      return;
+    }
+    setProfiles(prev => prev.map(p => (p.id === profileId ? { ...p, ...updates } : p)));
   }, []);
 
   const deleteProfile = useCallback((profileId: string) => {
@@ -5056,9 +5081,159 @@ const App = () => {
         </div>
 
         <div className="sidebar__section">
-          <div className="sidebar__section-label">Tabs</div>
+          {pinnedTabs.length > 0 && (
+            <>
+              <div className="sidebar__section-label">Pinned</div>
+              <div className="sidebar__tab-list">
+                {pinnedTabs.map((tab, tabIndex) => {
+                  const isSplitMember =
+                    activeSplit.isSplit &&
+                    (activeSplit.primaryTabId === tab.id || activeSplit.secondaryTabId === tab.id);
+                  const isSplitFocus =
+                    isSplitMember &&
+                    ((activeSplit.focus === 'primary' && activeSplit.primaryTabId === tab.id) ||
+                      (activeSplit.focus === 'secondary' && activeSplit.secondaryTabId === tab.id));
+                  const isDragging = draggedTabId === tab.id;
+                  const isDragOver = dragOverTabId === tab.id;
+                  return (
+                    <div
+                      key={tab.id}
+                      role="button"
+                      tabIndex={0}
+                      draggable
+                      className={`sidebar__tab is-pinned${tab.isActive ? ' is-active' : ''}${isSplitMember ? ' is-split' : ''}${isSplitFocus ? ' is-split-focus' : ''}${isDragging ? ' is-dragging' : ''}${isDragOver ? ' is-drag-over' : ''}`}
+                      onClick={() => setActiveTab(tab.id)}
+                      onKeyDown={event => {
+                        if (event.key === 'Enter' || event.key === ' ') {
+                          event.preventDefault();
+                          setActiveTab(tab.id);
+                        }
+                      }}
+                      onContextMenu={event => {
+                        event.preventDefault();
+                        window.sylph?.requestTabContextMenu?.({
+                          tabId: tab.id,
+                          isPinned: tab.isPinned,
+                          url: tab.url,
+                          position: { x: event.pageX, y: event.pageY },
+                        });
+                      }}
+                      onDragStart={event => {
+                        setDraggedTabId(tab.id);
+                        event.dataTransfer.effectAllowed = 'move';
+                        event.dataTransfer.setData('text/plain', tab.id);
+                      }}
+                      onDragEnd={() => {
+                        setDraggedTabId(null);
+                        setDragOverTabId(null);
+                      }}
+                      onDragOver={event => {
+                        event.preventDefault();
+                        event.dataTransfer.dropEffect = 'move';
+                        if (draggedTabId && draggedTabId !== tab.id) {
+                          setDragOverTabId(tab.id);
+                        }
+                      }}
+                      onDragLeave={() => {
+                        setDragOverTabId(null);
+                      }}
+                      onDrop={event => {
+                        event.preventDefault();
+                        const draggedId = event.dataTransfer.getData('text/plain');
+                        if (draggedId && draggedId !== tab.id) {
+                          const fromIndex = tabs.findIndex(t => t.id === draggedId);
+                          const toIndex = tabIndex;
+                          if (fromIndex !== -1 && toIndex !== -1) {
+                            reorderTabsInSpace(activeSpaceId, fromIndex, toIndex);
+                          }
+                        }
+                        setDraggedTabId(null);
+                        setDragOverTabId(null);
+                      }}
+                    >
+                      <div className="sidebar__tab-indicator" />
+                      <div className="sidebar__tab-content">
+                        <div className="sidebar__tab-line">
+                          <div className="sidebar__tab-favicon" aria-hidden="true">
+                            {tab.favicon ? (
+                              <img
+                                src={tab.favicon}
+                                alt=""
+                                onError={() => handleFaviconError(tab.id)}
+                              />
+                            ) : (
+                              <span>{(tab.title || 'N').slice(0, 1)}</span>
+                            )}
+                          </div>
+                          <div className="sidebar__tab-title">{tab.title || 'New Tab'}</div>
+                        </div>
+                      </div>
+                      <div className="sidebar__tab-actions">
+                        <button
+                          type="button"
+                          className="sidebar__tab-action"
+                          title="Move to space"
+                          aria-label="Move to space"
+                          disabled={spaces.length <= 1}
+                          onClick={event => {
+                            event.stopPropagation();
+                            if (spaces.length <= 1) return;
+                            setSpaceMenuTabId(current => (current === tab.id ? null : tab.id));
+                          }}
+                        >
+                          ⋯
+                        </button>
+                        <button
+                          type="button"
+                          className="sidebar__tab-close"
+                          aria-label="Close tab"
+                          onClick={event => {
+                            event.stopPropagation();
+                            closeTab(tab.id);
+                          }}
+                        >
+                          ×
+                        </button>
+                      </div>
+                      {spaceMenuTabId === tab.id && spaces.length > 1 && (
+                        <div
+                          className="sidebar__tab-menu"
+                          role="menu"
+                          onClick={event => event.stopPropagation()}
+                        >
+                          {spaces
+                            .filter(space => space.id !== tab.spaceId)
+                            .map(space => (
+                              <button
+                                key={space.id}
+                                type="button"
+                                className="sidebar__tab-menu-item"
+                                onClick={event => {
+                                  event.stopPropagation();
+                                  setSpaceMenuTabId(null);
+                                  moveTabToSpace(tab.id, space.id, tab.isActive);
+                                }}
+                              >
+                                <span
+                                  className="sidebar__tab-menu-dot"
+                                  style={{ backgroundColor: space.color }}
+                                  aria-hidden="true"
+                                />
+                                {space.name}
+                              </button>
+                            ))}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            </>
+          )}
+
+          <div className="sidebar__section-label">{pinnedTabs.length > 0 ? 'Tabs' : 'Tabs'}</div>
           <div className="sidebar__tab-list">
-            {tabs.map((tab, tabIndex) => {
+            {unpinnedTabs.map((tab, tabIndex) => {
               const isSplitMember =
                 activeSplit.isSplit &&
                 (activeSplit.primaryTabId === tab.id || activeSplit.secondaryTabId === tab.id);
@@ -5394,29 +5569,101 @@ const App = () => {
                   <div className="profile-menu__section">
                     <div className="profile-menu__label">Profiles</div>
                     {profiles.map(profile => (
-                      <button
-                        key={profile.id}
-                        type="button"
-                        className={`profile-menu__item${activeProfile?.id === profile.id ? ' is-active' : ''}`}
-                        onClick={() => {
-                          setIsProfileMenuOpen(false);
-                          // Open profile in new window if different from current
-                          if (profile.id !== activeProfile?.id) {
-                            window.sylph?.openProfileWindow(profile.id);
-                          }
-                        }}
-                      >
-                        <div
-                          className="profile-menu__item-avatar"
-                          style={{ backgroundColor: profile.color }}
+                      <div key={profile.id} style={{ position: 'relative', display: 'flex', alignItems: 'center', gap: '4px' }}>
+                        <button
+                          type="button"
+                          className={`profile-menu__item${activeProfile?.id === profile.id ? ' is-active' : ''}`}
+                          style={{ flex: 1 }}
+                          onClick={() => {
+                            setIsProfileMenuOpen(false);
+                            // Open profile in new window if different from current
+                            if (profile.id !== activeProfile?.id) {
+                              window.sylph?.openProfileWindow(profile.id);
+                            }
+                          }}
                         >
-                          {profile.icon || profile.name[0]}
-                        </div>
-                        <span className="profile-menu__item-name">{profile.name}</span>
-                        {profile.isIncognito && (
-                          <span className="profile-menu__item-badge">Incognito</span>
+                          <div
+                            className="profile-menu__item-avatar"
+                            style={{ backgroundColor: profile.color }}
+                          >
+                            {profile.icon || profile.name[0]}
+                          </div>
+                          <span className="profile-menu__item-name">{profile.name}</span>
+                          {profile.isIncognito && (
+                            <span className="profile-menu__item-badge">Incognito</span>
+                          )}
+                        </button>
+                        {profile.id !== DEFAULT_PROFILE_ID && !profile.isIncognito && (
+                          <div style={{ display: 'flex', gap: '4px' }}>
+                            <button
+                              type="button"
+                              className="profile-menu__item-action"
+                              title="Edit profile"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setEditingProfile(profile);
+                                setEditedProfileName(profile.name);
+                                setEditedProfileColor(profile.color);
+                                setIsProfileMenuOpen(false);
+                              }}
+                              style={{
+                                width: '32px',
+                                height: '32px',
+                                display: 'flex',
+                                alignItems: 'center',
+                                justifyContent: 'center',
+                                borderRadius: '8px',
+                                background: 'rgba(244, 241, 234, 0.08)',
+                                border: 'none',
+                                cursor: 'pointer',
+                                color: 'var(--color-cream-100)',
+                                fontSize: '0.9rem',
+                                transition: 'background 0.16s ease',
+                              }}
+                              onMouseEnter={(e) => {
+                                e.currentTarget.style.background = 'rgba(244, 241, 234, 0.16)';
+                              }}
+                              onMouseLeave={(e) => {
+                                e.currentTarget.style.background = 'rgba(244, 241, 234, 0.08)';
+                              }}
+                            >
+                              ✏️
+                            </button>
+                            <button
+                              type="button"
+                              className="profile-menu__item-action"
+                              title="Delete profile"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setProfileToDelete(profile);
+                                setIsProfileMenuOpen(false);
+                              }}
+                              style={{
+                                width: '32px',
+                                height: '32px',
+                                display: 'flex',
+                                alignItems: 'center',
+                                justifyContent: 'center',
+                                borderRadius: '8px',
+                                background: 'rgba(244, 85, 85, 0.15)',
+                                border: 'none',
+                                cursor: 'pointer',
+                                color: '#ff9999',
+                                fontSize: '0.9rem',
+                                transition: 'background 0.16s ease',
+                              }}
+                              onMouseEnter={(e) => {
+                                e.currentTarget.style.background = 'rgba(244, 85, 85, 0.25)';
+                              }}
+                              onMouseLeave={(e) => {
+                                e.currentTarget.style.background = 'rgba(244, 85, 85, 0.15)';
+                              }}
+                            >
+                              🗑️
+                            </button>
+                          </div>
                         )}
-                      </button>
+                      </div>
                     ))}
                   </div>
                   <div className="profile-menu__divider" />
@@ -6180,6 +6427,129 @@ const App = () => {
                 disabled={!newProfileName.trim()}
               >
                 Create
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Edit Profile Modal */}
+      {editingProfile && (
+        <div className="modal-overlay" onClick={() => setEditingProfile(null)}>
+          <div className="modal-content" onClick={e => e.stopPropagation()}>
+            <h3 className="modal-title">Edit Profile</h3>
+            <input
+              type="text"
+              className="modal-input"
+              placeholder="Profile name"
+              value={editedProfileName}
+              onChange={e => setEditedProfileName(e.target.value)}
+              onKeyDown={e => {
+                if (e.key === 'Enter' && editedProfileName.trim()) {
+                  updateProfile(editingProfile.id, {
+                    name: editedProfileName.trim(),
+                    color: editedProfileColor
+                  });
+                  setEditingProfile(null);
+                }
+                if (e.key === 'Escape') {
+                  setEditingProfile(null);
+                }
+              }}
+              autoFocus
+            />
+            <div style={{ marginTop: '16px' }}>
+              <label style={{ fontSize: '0.85rem', color: 'var(--color-muted)', marginBottom: '8px', display: 'block' }}>
+                Profile Color
+              </label>
+              <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+                {['#4fb276', '#60a5fa', '#f472b6', '#facc15', '#f97316', '#a78bfa', '#ef4444', '#10b981', '#8b5cf6', '#ec4899'].map(color => (
+                  <button
+                    key={color}
+                    type="button"
+                    onClick={() => setEditedProfileColor(color)}
+                    style={{
+                      width: '36px',
+                      height: '36px',
+                      borderRadius: '8px',
+                      backgroundColor: color,
+                      border: editedProfileColor === color ? '3px solid var(--color-cream-100)' : '2px solid rgba(244, 241, 234, 0.2)',
+                      cursor: 'pointer',
+                      transition: 'transform 0.16s ease, border-color 0.16s ease',
+                    }}
+                    onMouseEnter={e => {
+                      if (editedProfileColor !== color) {
+                        e.currentTarget.style.transform = 'scale(1.1)';
+                      }
+                    }}
+                    onMouseLeave={e => {
+                      e.currentTarget.style.transform = 'scale(1)';
+                    }}
+                  />
+                ))}
+              </div>
+            </div>
+            <div className="modal-actions">
+              <button
+                type="button"
+                className="modal-button modal-button--secondary"
+                onClick={() => setEditingProfile(null)}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="modal-button modal-button--primary"
+                onClick={() => {
+                  if (editedProfileName.trim()) {
+                    updateProfile(editingProfile.id, {
+                      name: editedProfileName.trim(),
+                      color: editedProfileColor
+                    });
+                    setEditingProfile(null);
+                  }
+                }}
+                disabled={!editedProfileName.trim()}
+              >
+                Save
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Delete Profile Confirmation Modal */}
+      {profileToDelete && (
+        <div className="modal-overlay" onClick={() => setProfileToDelete(null)}>
+          <div className="modal-content" onClick={e => e.stopPropagation()}>
+            <h3 className="modal-title">Delete Profile</h3>
+            <p style={{ margin: '16px 0', color: 'var(--color-muted)' }}>
+              Are you sure you want to delete the profile "<strong>{profileToDelete.name}</strong>"?
+              <br />
+              <br />
+              All tabs using this profile will be closed.
+            </p>
+            <div className="modal-actions">
+              <button
+                type="button"
+                className="modal-button modal-button--secondary"
+                onClick={() => setProfileToDelete(null)}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="modal-button modal-button--primary"
+                style={{
+                  background: '#ef4444',
+                  borderColor: '#ef4444'
+                }}
+                onClick={() => {
+                  deleteProfile(profileToDelete.id);
+                  setProfileToDelete(null);
+                }}
+              >
+                Delete
               </button>
             </div>
           </div>

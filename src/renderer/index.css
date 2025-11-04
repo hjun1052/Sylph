@@ -222,6 +222,8 @@ textarea {
   flex-direction: column;
   gap: 12px;
   flex: 1;
+  min-height: 0;
+  overflow-y: auto;
 }
 
 .sidebar__footer {
@@ -303,6 +305,20 @@ textarea {
 .sidebar__tab.is-drag-over {
   border-top: 2px solid var(--color-green-400);
   margin-top: -2px;
+}
+
+.sidebar__tab.is-pinned {
+  background: rgba(79, 178, 118, 0.15);
+  border-left: 3px solid rgba(79, 178, 118, 0.5);
+}
+
+.sidebar__tab.is-pinned:hover {
+  background: rgba(79, 178, 118, 0.25);
+}
+
+.sidebar__tab.is-pinned.is-active {
+  background: rgba(79, 178, 118, 0.3);
+  border-left: 3px solid rgba(79, 178, 118, 0.8);
 }
 
 .sidebar__tab-indicator {

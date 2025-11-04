@@ -40,6 +40,14 @@ const config: ForgeConfig = {
               js: './src/preload.ts',
             },
           },
+          {
+            html: './src/renderer/incognito.html',
+            js: './src/renderer/incognito.ts',
+            name: 'incognito_page',
+            preload: {
+              js: './src/preload.ts',
+            },
+          },
         ],
       },
     }),

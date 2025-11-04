@@ -491,14 +491,6 @@ const createWindow = (profileId?: string) => {
     },
   });
 
-  // Handle webview setup to enable new-window events
-  win.webContents.on('will-attach-webview', (event, webPreferences, params) => {
-    // Enable new-window event for webviews
-    (webPreferences as any).nativeWindowOpen = false;
-    webPreferences.contextIsolation = true;
-    webPreferences.nodeIntegration = false;
-  });
-
   // Store profile ID if provided
   if (profileId) {
     profileWindows.set(profileId, win);
@@ -774,7 +766,15 @@ const setupWebviewContextMenus = () => {
       passGuardStateByWebContents.delete(contents.id);
     });
 
-    contents.setWindowOpenHandler(() => {
+    contents.setWindowOpenHandler((details) => {
+      const parentWebContents = contents.hostWebContents;
+      if (parentWebContents && !parentWebContents.isDestroyed()) {
+        parentWebContents.send('webview:new-window', {
+          url: details.url,
+          disposition: details.disposition,
+          frameName: details.frameName,
+        });
+      }
       return { action: 'deny' };
     });
 
