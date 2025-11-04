@@ -5,6 +5,8 @@ type Extension = {
   name: string;
   version: number | string;
   path?: string;
+  hasBrowserAction?: boolean;
+  icon?: string | null;
 };
 
 type SaveStatus = 'idle' | 'saving' | 'saved' | 'error';

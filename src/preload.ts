@@ -236,11 +236,17 @@ const api = {
         success: boolean;
         error?: string;
       }>,
-    showPopup: (extensionId: string) =>
-      ipcRenderer.invoke('extensions:show-popup', extensionId) as Promise<{
-        success: boolean;
-        error?: string;
-      }>,
+    showPopup: async (extensionId: string) => {
+      try {
+        return await ipcRenderer.invoke('extensions:show-popup', extensionId);
+      } catch (error) {
+        console.warn('[extensions] Failed to show popup', error);
+        return {
+          success: false,
+          error: error instanceof Error ? error.message : String(error),
+        };
+      }
+    },
   },
   content: {
     captureScreenshot: (payload: { webContentsId: number; format?: 'png' | 'jpeg' }) =>

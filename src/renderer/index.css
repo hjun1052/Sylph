@@ -762,6 +762,66 @@ textarea {
   background: rgba(244, 241, 234, 0.16);
 }
 
+.extensions-menu-container {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.extensions-menu {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  min-width: 220px;
+  padding: 8px;
+  border-radius: var(--radius-md);
+  background: rgba(20, 30, 22, 0.96);
+  box-shadow: 0 12px 28px rgba(6, 20, 15, 0.55), 0 0 0 1px rgba(244, 241, 234, 0.12);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  z-index: 140;
+}
+
+.extensions-menu__item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--color-cream-100);
+  font-size: 0.85rem;
+  padding: 8px 10px;
+  text-align: left;
+  transition: background var(--transition), color var(--transition);
+}
+
+.extensions-menu__item:hover {
+  background: rgba(244, 241, 234, 0.1);
+  color: var(--color-cream-50);
+}
+
+.extensions-menu__item:focus-visible {
+  outline: 2px solid rgba(98, 199, 138, 0.6);
+  outline-offset: 2px;
+}
+
+.extensions-menu__icon {
+  width: 24px;
+  height: 24px;
+  border-radius: 6px;
+  object-fit: contain;
+  background: rgba(244, 241, 234, 0.12);
+  padding: 2px;
+}
+
+.extensions-menu__name {
+  flex: 1;
+  line-height: 1.2;
+}
+
 .main-toolbar__split-group {
   display: inline-flex;
   align-items: center;

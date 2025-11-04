@@ -16,6 +16,9 @@ const DEFAULT_SPLIT_RATIO = 0.52;
 const SPACE_COLOR_PALETTE = ['var(--color-green-400)', '#f472b6', '#60a5fa', '#facc15', '#f97316'];
 const clampSplitRatio = (value: number) => Math.min(0.85, Math.max(0.15, value));
 
+const EXTENSION_ICON_FALLBACK_DATA_URI =
+  'data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="%23c4cabf"><path d="M10.5 2a2.5 2.5 0 0 0-2.45 2H6a2 2 0 0 0-2 2v3.67a2.33 2.33 0 1 0 0 4.66V18a2 2 0 0 0 2 2h3.67a2.33 2.33 0 1 1 4.66 0H18a2 2 0 0 0 2-2v-2.17a2.33 2.33 0 1 1 0-3.66V6a2 2 0 0 0-2-2h-2.17A2.5 2.5 0 0 0 10.5 2Z"/></svg>';
+
 type SidebarSection = 'bookmarks' | 'pinned' | 'tabs';
 
 import React, {
@@ -57,6 +60,7 @@ import {
   sanitizeHostList,
   type PassGuardSettings,
 } from '../shared/passguard';
+import type { Buffer } from 'buffer';
 
 type SidebarDragPayload = { type: 'tab'; id: string } | { type: 'bookmark'; id: string };
 
@@ -133,6 +137,28 @@ const createDefaultSplitState = (): SplitState => ({
   ratio: DEFAULT_SPLIT_RATIO,
   focus: 'primary',
 });
+
+const getWebviewNavigationState = (webview: WebviewTag) => {
+  const fallback = {
+    canGoBack: typeof webview.canGoBack === 'function' ? webview.canGoBack() : false,
+    canGoForward: typeof webview.canGoForward === 'function' ? webview.canGoForward() : false,
+  };
+
+  try {
+    const getWebContents = (webview as unknown as { getWebContents?: () => { navigationHistory?: { canGoBack: () => boolean; canGoForward: () => boolean } } }).getWebContents;
+    const navigationHistory = getWebContents?.()?.navigationHistory;
+    if (navigationHistory) {
+      return {
+        canGoBack: navigationHistory.canGoBack(),
+        canGoForward: navigationHistory.canGoForward(),
+      };
+    }
+  } catch (error) {
+    console.warn('[navigation] Failed to read navigationHistory', error);
+  }
+
+  return fallback;
+};
 
 const ADBLOCK_PICKER_SCRIPT = String.raw`
 (() => {
@@ -941,7 +967,8 @@ const App = () => {
   const [isHistoryMenuOpen, setIsHistoryMenuOpen] = useState(false);
   const [historyMenuType, setHistoryMenuType] = useState<'back' | 'forward' | null>(null);
   const [historyMenuPosition, setHistoryMenuPosition] = useState({ x: 0, y: 0 });
-  const [browserActionExtensions, setBrowserActionExtensions] = useState<Array<{ id: string; name: string; icon?: string }>>([]);
+  const [browserActionExtensions, setBrowserActionExtensions] = useState<Array<{ id: string; name: string; icon: string | null }>>([]);
+  const [isExtensionMenuOpen, setIsExtensionMenuOpen] = useState(false);
 
   const webviewListenersRef = useRef<Map<string, () => void>>(new Map());
   const activeWebviewRef = useRef<WebviewTag | null>(null);
@@ -953,6 +980,8 @@ const App = () => {
   const passGuardAppliedRef = useRef<Map<string, AppliedPassGuardSnapshot>>(new Map());
   const passGuardPanelRef = useRef<HTMLDivElement | null>(null);
   const bookmarkListRef = useRef<HTMLDivElement | null>(null);
+  const extensionMenuRef = useRef<HTMLDivElement | null>(null);
+  const extensionButtonRef = useRef<HTMLButtonElement | null>(null);
   const [passGuardSettings, setPassGuardSettings] = useState<PassGuardSettings>(() => ({
     ...DEFAULT_PASS_GUARD_SETTINGS,
   }));
@@ -1220,19 +1249,56 @@ const App = () => {
     setPassGuardExcludeDraft(passGuardSettings.excludeHosts.join('\n'));
   }, [passGuardSettings.includeHosts, passGuardSettings.excludeHosts]);
 
+  useEffect(() => {
+    if (!isExtensionMenuOpen) {
+      return;
+    }
+
+    const handleClickOutside = (event: MouseEvent) => {
+      const target = event.target as Node | null;
+      if (
+        extensionMenuRef.current?.contains(target) ||
+        extensionButtonRef.current?.contains(target)
+      ) {
+        return;
+      }
+      setIsExtensionMenuOpen(false);
+    };
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setIsExtensionMenuOpen(false);
+      }
+    };
+
+    window.addEventListener('mousedown', handleClickOutside);
+    window.addEventListener('keydown', handleKeyDown);
+    return () => {
+      window.removeEventListener('mousedown', handleClickOutside);
+      window.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [isExtensionMenuOpen]);
+
   // Load extensions list
   useEffect(() => {
     const loadExtensions = async () => {
       try {
         const result = await window.sylph?.extensions?.list?.();
         if (result?.success && result.extensions) {
-          // Filter extensions that have browser actions
-          const extensionsWithActions = result.extensions.map(ext => ({
-            id: ext.id,
-            name: ext.name,
-            icon: `crx://extension-icon/${ext.id}/32/0`, // CRX protocol for extension icons
-          }));
+          const extensionsWithActions = result.extensions
+            .filter(ext => ext.hasBrowserAction)
+            .map(ext => {
+              const iconPath = typeof ext.icon === 'string' ? ext.icon.replace(/^\/+/, '') : null;
+              return {
+                id: ext.id,
+                name: ext.name,
+                icon: iconPath ? `chrome-extension://${ext.id}/${iconPath}` : null,
+              };
+            });
           setBrowserActionExtensions(extensionsWithActions);
+          if (extensionsWithActions.length === 0) {
+            setIsExtensionMenuOpen(false);
+          }
         }
       } catch (error) {
         console.error('Failed to load extensions', error);
@@ -2628,6 +2694,44 @@ const App = () => {
   }, [activeTab?.id]);
 
   useEffect(() => {
+    const interactiveIds = new Set<string>();
+    const activeId = activeTab?.id ?? null;
+    if (activeSplit.isSplit) {
+      if (activeSplit.primaryTabId) {
+        interactiveIds.add(activeSplit.primaryTabId);
+      }
+      if (activeSplit.secondaryTabId) {
+        interactiveIds.add(activeSplit.secondaryTabId);
+      }
+    } else if (activeId) {
+      interactiveIds.add(activeId);
+    }
+
+    webviewsRef.current.forEach((webview, id) => {
+      if (!webview) return;
+      const shouldBeInteractive = interactiveIds.has(id);
+      webview.style.pointerEvents = shouldBeInteractive ? 'auto' : 'none';
+      webview.style.visibility = shouldBeInteractive ? 'visible' : 'hidden';
+      webview.style.opacity = shouldBeInteractive ? '1' : '0';
+    });
+
+    if (activeId) {
+      const activeWebview = webviewsRef.current.get(activeId);
+      try {
+        activeWebview?.focus?.();
+      } catch (error) {
+        console.warn('Failed to focus webview', error);
+      }
+    }
+  }, [
+    activeSplit.isSplit,
+    activeSplit.primaryTabId,
+    activeSplit.secondaryTabId,
+    activeTab?.id,
+    tabs.length,
+  ]);
+
+  useEffect(() => {
     latestAddressFocusRef.current = isAddressFocused;
   }, [isAddressFocused]);
 
@@ -3651,11 +3755,16 @@ const App = () => {
 
   const setupWebviewListeners = useCallback(
     (tabId: string, webview: WebviewTag) => {
+      if (typeof (webview as unknown as { setMaxListeners?: (n: number) => void }).setMaxListeners === 'function') {
+        (webview as unknown as { setMaxListeners: (n: number) => void }).setMaxListeners(0);
+      }
+
       const updateNavigationState = () => {
+        const navigation = getWebviewNavigationState(webview);
         updateTabById(tabId, tab => ({
           ...tab,
-          canGoBack: webview.canGoBack(),
-          canGoForward: webview.canGoForward(),
+          canGoBack: navigation.canGoBack,
+          canGoForward: navigation.canGoForward,
         }));
       };
 
@@ -3865,6 +3974,41 @@ const App = () => {
         if (!targetUrl) {
           return;
         }
+
+        const rawEvent = event as WebviewNewWindowEvent & {
+          postBody?: { data?: Buffer; contentType?: string };
+          referrer?: string;
+        };
+        const postBody = rawEvent.postBody;
+        if (postBody?.data && postBody.data.length > 0) {
+          try {
+            const extraHeaders =
+              postBody.contentType && postBody.contentType.length > 0
+                ? `Content-Type: ${postBody.contentType}\n`
+                : '';
+            webview.loadURL(targetUrl, {
+              httpReferrer: rawEvent.referrer,
+              userAgent:
+                typeof webview.getUserAgent === 'function'
+                  ? webview.getUserAgent()
+                  : undefined,
+              postData:
+                postBody.data
+                  ? [
+                      {
+                        type: 'rawData' as const,
+                        bytes: postBody.data as Buffer,
+                      },
+                    ]
+                  : undefined,
+              extraHeaders,
+            });
+            return;
+          } catch (error) {
+            console.error('[new-window] Failed to load POST target directly', error);
+          }
+        }
+
         createTab({
           url: targetUrl,
           title: event.frameName || (targetUrl ? targetUrl : 'New Tab'),
@@ -6395,41 +6539,56 @@ const App = () => {
             <span className="main-toolbar__divider" aria-hidden="true" />
             {/* Extension icons */}
             {browserActionExtensions.length > 0 && (
-              <>
-                {browserActionExtensions.map(ext => (
-                  <button
-                    key={ext.id}
-                    className="main-toolbar__button"
-                    type="button"
-                    title={ext.name}
-                    onClick={async () => {
-                      try {
-                        await window.sylph?.extensions?.showPopup?.(ext.id);
-                      } catch (error) {
-                        console.error('Failed to show extension popup:', error);
-                      }
-                    }}
-                  >
-                    <img
-                      src={ext.icon}
-                      alt={ext.name}
-                      style={{
-                        width: '20px',
-                        height: '20px',
-                        objectFit: 'contain',
-                      }}
-                      onError={(e) => {
-                        // Fallback to a default icon if the image fails to load
-                        (e.target as HTMLImageElement).style.display = 'none';
-                        const fallback = document.createElement('span');
-                        fallback.textContent = '🧩';
-                        e.currentTarget.parentElement?.appendChild(fallback);
-                      }}
-                    />
-                  </button>
-                ))}
-                <span className="main-toolbar__divider" aria-hidden="true" />
-              </>
+              <div className="extensions-menu-container" ref={extensionMenuRef}>
+                <button
+                  ref={extensionButtonRef}
+                  className={`main-toolbar__button${isExtensionMenuOpen ? ' is-active' : ''}`}
+                  type="button"
+                  title="Extensions"
+                  aria-haspopup="true"
+                  aria-expanded={isExtensionMenuOpen ? 'true' : 'false'}
+                  onClick={() => setIsExtensionMenuOpen(prev => !prev)}
+                >
+                  🧩
+                </button>
+                {isExtensionMenuOpen && (
+                  <div className="extensions-menu" role="menu">
+                    {browserActionExtensions.map(ext => (
+                      <button
+                        key={ext.id}
+                        type="button"
+                        className="extensions-menu__item"
+                        role="menuitem"
+                        onClick={async () => {
+                          setIsExtensionMenuOpen(false);
+                          try {
+                            await window.sylph?.extensions?.showPopup?.(ext.id);
+                          } catch (error) {
+                            console.error('Failed to show extension popup:', error);
+                          }
+                        }}
+                      >
+                        <img
+                          src={ext.icon ?? EXTENSION_ICON_FALLBACK_DATA_URI}
+                          alt=""
+                          className="extensions-menu__icon"
+                          data-extension-id={ext.id}
+                          onError={event => {
+                            const target = event.currentTarget;
+                            if (target.dataset.fallbackApplied === 'true') return;
+                            target.dataset.fallbackApplied = 'true';
+                            target.src = EXTENSION_ICON_FALLBACK_DATA_URI;
+                          }}
+                        />
+                        <span className="extensions-menu__name">{ext.name}</span>
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+            {browserActionExtensions.length > 0 && (
+              <span className="main-toolbar__divider" aria-hidden="true" />
             )}
             <div className="main-toolbar__split-group">
               <button

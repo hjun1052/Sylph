@@ -5,8 +5,10 @@ import {
   Menu,
   MenuItem,
   MenuItemConstructorOptions,
+  WebContents,
   session,
 } from 'electron';
+import type { Extension as ElectronExtension } from 'electron';
 import { promises as fs } from 'fs';
 import path from 'path';
 import { pathToFileURL } from 'url';
@@ -53,6 +55,20 @@ type PassGuardUpdatePayload = PassGuardOverrideState & {
 };
 
 const passGuardStateByWebContents = new Map<number, PassGuardOverrideState>();
+
+const getNavigationState = (contents: WebContents) => {
+  const navigationHistory = contents.navigationHistory;
+  if (navigationHistory) {
+    return {
+      canGoBack: navigationHistory.canGoBack(),
+      canGoForward: navigationHistory.canGoForward(),
+    };
+  }
+  return {
+    canGoBack: contents.canGoBack(),
+    canGoForward: contents.canGoForward(),
+  };
+};
 
 const SEC_CH_HINT_HEADERS = [
   'Sec-Ch-Ua',
@@ -828,16 +844,18 @@ const setupWebviewContextMenus = () => {
           ]
         : [];
 
+      const navigation = getNavigationState(contents);
+
       const template: MenuItemConstructorOptions[] = [
         ...linkItems,
         {
           label: 'Back',
-          enabled: contents.canGoBack(),
+          enabled: navigation.canGoBack,
           click: () => contents.goBack(),
         },
         {
           label: 'Forward',
-          enabled: contents.canGoForward(),
+          enabled: navigation.canGoForward,
           click: () => contents.goForward(),
         },
         {
@@ -1146,15 +1164,72 @@ ipcMain.handle('extensions:unload', async (_event, extensionId: string) => {
 
 ipcMain.handle('extensions:list', async () => {
   try {
-    const exts = session.fromPartition('persist:sylph').getAllExtensions();
+    const sylphSession = session.fromPartition('persist:sylph');
+    const extensionService = (sylphSession as any).extensions;
+    const exts: ElectronExtension[] =
+      typeof extensionService?.getAllExtensions === 'function'
+        ? extensionService.getAllExtensions()
+        : sylphSession.getAllExtensions();
+    const extensions = await Promise.all(
+      exts.map(async ext => {
+        const manifest = (ext as any).manifest ?? {};
+        const browserAction = manifest.browser_action ?? manifest.action ?? manifest.page_action;
+
+        const resolveIconPath = (iconValue: any): string | null => {
+          if (!iconValue) return null;
+          if (typeof iconValue === 'string') {
+            return iconValue;
+          }
+          if (typeof iconValue === 'object') {
+            const candidates = ['128', '64', '48', '32', '24', '20', '19', '16'];
+            for (const size of candidates) {
+              if (iconValue[size]) return iconValue[size];
+            }
+            const values = Object.values(iconValue).filter(value => typeof value === 'string');
+            if (values.length > 0) {
+              return values[0] as string;
+            }
+          }
+          return null;
+        };
+
+        const iconRelativePath =
+          resolveIconPath(browserAction?.default_icon) ??
+          resolveIconPath(manifest.icons) ??
+          null;
+
+        let iconDataUri: string | null = null;
+        if (iconRelativePath && !iconRelativePath.startsWith('chrome-extension://')) {
+          try {
+            const absoluteIconPath = path.resolve(ext.path, iconRelativePath);
+            const data = await fs.readFile(absoluteIconPath);
+            const lower = iconRelativePath.toLowerCase();
+            const mime =
+              lower.endsWith('.png') ? 'image/png'
+              : lower.endsWith('.jpg') || lower.endsWith('.jpeg') ? 'image/jpeg'
+              : lower.endsWith('.svg') ? 'image/svg+xml'
+              : 'application/octet-stream';
+            iconDataUri = `data:${mime};base64,${data.toString('base64')}`;
+          } catch (error) {
+            console.warn('Failed to load extension icon', ext.id, error);
+          }
+        }
+
+        const hasBrowserAction = Boolean(browserAction);
+
+        return {
+          id: ext.id,
+          name: ext.name,
+          version: (ext as any).version || 0,
+          path: ext.path,
+          hasBrowserAction,
+          icon: iconDataUri,
+        };
+      }),
+    );
     return {
       success: true,
-      extensions: exts.map(ext => ({
-        id: ext.id,
-        name: ext.name,
-        version: (ext as any).version || 0,
-        path: ext.path,
-      })),
+      extensions,
     };
   } catch (error) {
     return { success: false, error: error instanceof Error ? error.message : String(error) };
@@ -1610,13 +1685,14 @@ ipcMain.handle('webview:show-context-menu', async (event, payload: {
   if (!params.isEditable) {
     const wc = require('electron').webContents.fromId(webContentsId);
     if (wc) {
-      if (wc.canGoBack()) {
+      const navigation = getNavigationState(wc);
+      if (navigation.canGoBack) {
         template.push({
           label: 'Back',
           click: () => wc.goBack()
         });
       }
-      if (wc.canGoForward()) {
+      if (navigation.canGoForward) {
         template.push({
           label: 'Forward',
           click: () => wc.goForward()

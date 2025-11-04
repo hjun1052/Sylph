@@ -117,7 +117,7 @@ declare global {
         }>;
         list: () => Promise<{
           success: boolean;
-          extensions?: Array<{ id: string; name: string; version: number; path: string }>;
+          extensions?: Array<{ id: string; name: string; version: number; path: string; hasBrowserAction?: boolean; icon?: string | null }>;
           error?: string;
         }>;
         addTab: (webContentsId: number) => Promise<void>;

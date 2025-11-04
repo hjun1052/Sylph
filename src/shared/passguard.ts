@@ -49,6 +49,7 @@ const isWildcardPattern = (pattern: string) => pattern.startsWith('.') || patter
 const hostMatchesPattern = (url: URL, pattern: string) => {
   const normalized = normalizeHostPattern(pattern);
   if (!normalized) return false;
+
   if (isWildcardPattern(pattern)) {
     return hostEndsWith(url, normalized);
   }
@@ -70,8 +71,10 @@ const PASS_GUARD_PATTERNS: PassGuardPattern[] = [
   {
     reason: 'Microsoft 로그인 페이지 감지',
     test: url =>
+      hostEquals(url, 'account.microsoft.com') ||
       hostEquals(url, 'login.live.com') ||
       hostEquals(url, 'login.microsoftonline.com') ||
+      hostEquals(url, 'login.microsoft.com') ||
       (hostEndsWith(url, 'microsoft.com') && pathnameIncludesAny(url, ['login', 'oauth2', 'srf'])),
   },
   {
@@ -103,6 +106,18 @@ const PASS_GUARD_PATTERNS: PassGuardPattern[] = [
   {
     reason: 'Notion 인증 페이지 감지',
     test: url => hostEndsWith(url, 'notion.so') && pathnameIncludesAny(url, ['login', 'oauth']),
+  },
+  {
+    reason: 'Dropbox 로그인 페이지 감지',
+    test: url => hostEquals(url, 'www.dropbox.com') && pathnameIncludesAny(url, ['login', 'signin']),
+  },
+  {
+    reason: 'Figma 로그인 페이지 감지',
+    test: url => hostEquals(url, 'www.figma.com') && pathnameIncludesAny(url, ['login', 'signin']),
+  },
+  {
+    reason: 'Claude 로그인 감지',
+    test: url => hostEquals(url, 'claude.ai') && pathnameIncludesAny(url, ['login', 'signin']),
   },
   {
     reason: 'Chrome Web Store 접근',
