@@ -36,6 +36,7 @@ export async function deriveKey(
 ): Promise<Buffer> {
   const salt = Buffer.from(config.salt, 'base64');
 
+  // Type assertion needed because @types/argon2 is outdated (v0.14 vs actual v0.44)
   const hash = await argon2.hash(masterPassword, {
     type: 2, // argon2id
     salt,
@@ -45,7 +46,7 @@ export async function deriveKey(
     parallelism: config.params.parallelism,
     hashLength: 32,
     raw: true, // Return raw buffer instead of encoded string
-  });
+  } as any);
 
   return Buffer.isBuffer(hash) ? hash : Buffer.from(hash);
 }

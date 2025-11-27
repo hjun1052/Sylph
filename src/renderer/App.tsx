@@ -43,6 +43,7 @@ import { HistoryEntry, HistoryDatabase, MAX_HISTORY_ENTRIES, HISTORY_CLEANUP_INT
 import { Bookmark, BookmarkFolder, BookmarkDatabase, BOOKMARKS_STORAGE_KEY, DEFAULT_FOLDER_ID } from './types/bookmark';
 import { ArchivedTab, ArchiveSettings, DEFAULT_ARCHIVE_SETTINGS, ARCHIVE_STORAGE_KEY, ARCHIVE_SETTINGS_STORAGE_KEY } from './types/archive';
 import { Profile, DEFAULT_PROFILE_ID, createDefaultProfile, createIncognitoProfile, PROFILES_STORAGE_KEY } from './types/profile';
+import { DownloadDatabase, DOWNLOADS_STORAGE_KEY } from './types/download';
 import { marked } from 'marked';
 import DOMPurify from 'dompurify';
 import type {
@@ -61,6 +62,7 @@ import {
   type PassGuardSettings,
 } from '../shared/passguard';
 import type { Buffer } from 'buffer';
+import { injectFlowPassContentScript } from '../flowpass';
 
 type SidebarDragPayload = { type: 'tab'; id: string } | { type: 'bookmark'; id: string };
 
@@ -969,6 +971,7 @@ const App = () => {
   const [historyMenuPosition, setHistoryMenuPosition] = useState({ x: 0, y: 0 });
   const [browserActionExtensions, setBrowserActionExtensions] = useState<Array<{ id: string; name: string; icon: string | null }>>([]);
   const [isExtensionMenuOpen, setIsExtensionMenuOpen] = useState(false);
+  const [capturedLogin, setCapturedLogin] = useState<{ host: string; url: string; username: string; password: string } | null>(null);
 
   const webviewListenersRef = useRef<Map<string, () => void>>(new Map());
   const activeWebviewRef = useRef<WebviewTag | null>(null);
@@ -1089,6 +1092,23 @@ const App = () => {
   }, []);
 
   const [activeProfileId, setActiveProfileId] = useState<string>(windowProfileId);
+  const [downloadDatabase, setDownloadDatabase] = useState<DownloadDatabase>(() => {
+    try {
+      const stored = window.localStorage?.getItem(DOWNLOADS_STORAGE_KEY);
+      if (stored) {
+        const parsed = JSON.parse(stored);
+        return {
+          downloads: new Map(Object.entries(parsed.downloads || {})),
+          lastCleanup: parsed.lastCleanup || Date.now(),
+        };
+      }
+    } catch (error) {
+      console.warn('Failed to load downloads database', error);
+    }
+    return { downloads: new Map(), lastCleanup: Date.now() };
+  });
+  const [showDownloadsPage, setShowDownloadsPage] = useState(false);
+  const [showHistoryPage, setShowHistoryPage] = useState(false);
 
   // Filter tabs by current window's profile
   const tabs = useMemo(() => {
@@ -1334,6 +1354,19 @@ const App = () => {
     },
     [],
   );
+
+  // Download management functions
+  const saveDownloadsToStorage = useCallback((db: DownloadDatabase) => {
+    try {
+      const serialized = {
+        downloads: Object.fromEntries(db.downloads),
+        lastCleanup: db.lastCleanup,
+      };
+      window.localStorage?.setItem(DOWNLOADS_STORAGE_KEY, JSON.stringify(serialized));
+    } catch (error) {
+      console.warn('Failed to save downloads database', error);
+    }
+  }, []);
 
   // History management functions
   const saveHistoryToStorage = useCallback((db: HistoryDatabase) => {
@@ -3851,7 +3884,19 @@ const App = () => {
         const currentTitle = webview.getTitle();
 
         if (currentUrl && currentUrl.startsWith('http')) {
-          // Use a more reliable method: inject script to get favicon from DOM
+          // Immediately set fallback favicon using Google's service
+          const fallbackFavicon = resolveFaviconUrl([], currentUrl);
+          console.log('[Favicon] Setting fallback for', currentUrl, ':', fallbackFavicon);
+          if (fallbackFavicon) {
+            updateTabById(tabId, tab => ({
+              ...tab,
+              favicon: fallbackFavicon,
+            }));
+          }
+          // Add to browsing history with fallback favicon
+          addToHistory(currentUrl, currentTitle, fallbackFavicon);
+
+          // Try to get better favicon from page DOM (but don't rely on it)
           const faviconScript = `
             (function() {
               const links = Array.from(document.querySelectorAll('link[rel*="icon"]'));
@@ -3866,27 +3911,18 @@ const App = () => {
             .then((favicons: string[]) => {
               console.log('[Favicon Script] Found icons:', favicons, 'for', currentUrl);
               const candidate = resolveFaviconUrl(favicons || [], currentUrl);
-              if (candidate) {
+              // Only update if we found a better favicon (data: URL from page)
+              if (candidate && candidate.startsWith('data:')) {
+                console.log('[Favicon] Updating to data URL from page');
                 updateTabById(tabId, tab => ({
                   ...tab,
                   favicon: candidate,
                 }));
               }
-              // Add to browsing history after we have favicon
-              addToHistory(currentUrl, currentTitle, candidate);
             })
             .catch(err => {
-              console.warn('[Favicon Script] Failed:', err);
-              // Fallback to direct favicon.ico
-              const fallbackFavicon = resolveFaviconUrl([], currentUrl);
-              if (fallbackFavicon) {
-                updateTabById(tabId, tab => ({
-                  ...tab,
-                  favicon: fallbackFavicon,
-                }));
-              }
-              // Add to browsing history even if favicon failed
-              addToHistory(currentUrl, currentTitle, fallbackFavicon);
+              console.warn('[Favicon Script] Failed (already using fallback):', err);
+              // Already using fallback, so nothing to do
             });
         }
       };
@@ -3915,6 +3951,33 @@ const App = () => {
         if (currentTab) {
           void applyPassGuardToTab(currentTab);
         }
+
+        // Inject FlowPass content script for password autofill
+        injectFlowPassContentScript(webview);
+
+        // Check for captured logins periodically`
+        const checkCapturedLogins = async () => {
+          try {
+            const result = await window.sylph?.flowpass?.getCapturedLogins();
+            if (result?.success && result.captures && result.captures.length > 0) {
+              // Show the first captured login
+              setCapturedLogin(result.captures[0]);
+            }
+          } catch (error) {
+            console.error('[FlowPass] Failed to check captured logins:', error);
+          }
+        };
+
+        // Check immediately and then every 2 seconds
+        void checkCapturedLogins();
+        const captureCheckInterval = setInterval(() => {
+          void checkCapturedLogins();
+        }, 2000);
+
+        // Clear interval when tab is closed
+        setTimeout(() => {
+          clearInterval(captureCheckInterval);
+        }, 300000); // Stop checking after 5 minutes
 
         // Inject link click interceptor for target="_blank" links
         const linkInterceptScript = `
@@ -6457,6 +6520,22 @@ const App = () => {
           <button
             type="button"
             className="sidebar__settings-button"
+            onClick={() => setShowDownloadsPage(true)}
+            title="Downloads"
+          >
+            ⏬ Downloads
+          </button>
+          <button
+            type="button"
+            className="sidebar__settings-button"
+            onClick={() => setShowHistoryPage(true)}
+            title="History"
+          >
+            🕐 History
+          </button>
+          <button
+            type="button"
+            className="sidebar__settings-button"
             onClick={handleOpenSettings}
           >
             ⚙ Settings
@@ -6891,6 +6970,176 @@ const App = () => {
               <span className="automation-overlay__label">
                 {currentAutomationStep.label}
               </span>
+            </div>
+          )}
+
+          {/* Download Manager Page */}
+          {showDownloadsPage && (
+            <div className="overlay-page">
+              <div className="overlay-page__header">
+                <h1>Downloads</h1>
+                <button
+                  type="button"
+                  className="overlay-page__close"
+                  onClick={() => setShowDownloadsPage(false)}
+                  aria-label="Close downloads"
+                >
+                  ×
+                </button>
+              </div>
+              <div className="overlay-page__content">
+                {Array.from(downloadDatabase.downloads.values())
+                  .sort((a, b) => b.startTime - a.startTime)
+                  .map(download => (
+                    <div key={download.id} className="download-item">
+                      <div className="download-item__icon">
+                        {download.state === 'progressing' ? '⏬' :
+                         download.state === 'completed' ? '✓' :
+                         download.state === 'cancelled' ? '✗' : '⚠'}
+                      </div>
+                      <div className="download-item__info">
+                        <div className="download-item__filename">{download.filename}</div>
+                        <div className="download-item__details">
+                          <span className="download-item__url">{download.url}</span>
+                          <span className="download-item__size">
+                            {download.state === 'progressing'
+                              ? `${Math.round((download.receivedBytes / download.totalBytes) * 100)}%`
+                              : `${(download.totalBytes / 1024 / 1024).toFixed(2)} MB`}
+                          </span>
+                        </div>
+                        {download.state === 'progressing' && (
+                          <div className="download-item__progress">
+                            <div
+                              className="download-item__progress-bar"
+                              style={{ width: `${(download.receivedBytes / download.totalBytes) * 100}%` }}
+                            />
+                          </div>
+                        )}
+                      </div>
+                      <div className="download-item__actions">
+                        {download.state === 'completed' && (
+                          <button
+                            type="button"
+                            className="download-item__action"
+                            onClick={() => {
+                              window.sylph?.downloads?.showInFolder({ path: download.savePath });
+                            }}
+                            title="Show in folder"
+                          >
+                            📁
+                          </button>
+                        )}
+                        {download.state === 'progressing' && (
+                          <>
+                            <button
+                              type="button"
+                              className="download-item__action"
+                              onClick={() => {
+                                if (download.isPaused) {
+                                  window.sylph?.downloads?.resumeDownload({ id: download.id });
+                                } else {
+                                  window.sylph?.downloads?.pauseDownload({ id: download.id });
+                                }
+                              }}
+                              title={download.isPaused ? 'Resume' : 'Pause'}
+                            >
+                              {download.isPaused ? '▶' : '⏸'}
+                            </button>
+                            <button
+                              type="button"
+                              className="download-item__action"
+                              onClick={() => {
+                                window.sylph?.downloads?.cancelDownload({ id: download.id });
+                              }}
+                              title="Cancel"
+                            >
+                              ✗
+                            </button>
+                          </>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                {downloadDatabase.downloads.size === 0 && (
+                  <div className="overlay-page__empty">No downloads yet</div>
+                )}
+              </div>
+            </div>
+          )}
+
+          {/* History Page */}
+          {showHistoryPage && (
+            <div className="overlay-page">
+              <div className="overlay-page__header">
+                <h1>History</h1>
+                <button
+                  type="button"
+                  className="overlay-page__close"
+                  onClick={() => setShowHistoryPage(false)}
+                  aria-label="Close history"
+                >
+                  ×
+                </button>
+              </div>
+              <div className="overlay-page__content">
+                {Array.from(historyDatabase.entries.values())
+                  .sort((a, b) => b.lastVisitTime - a.lastVisitTime)
+                  .map(entry => (
+                    <div
+                      key={entry.id}
+                      className="history-item"
+                      onClick={() => {
+                        setShowHistoryPage(false);
+                        if (!activeTab) return;
+                        updateTabById(activeTab.id, tab => ({
+                          ...tab,
+                          url: entry.url,
+                          title: entry.title,
+                          isLoading: true,
+                          updatedAt: Date.now(),
+                        }));
+                      }}
+                    >
+                      <div className="history-item__favicon">
+                        {entry.favicon ? (
+                          <img src={entry.favicon} alt="" />
+                        ) : (
+                          <span>{(entry.title || 'N').slice(0, 1)}</span>
+                        )}
+                      </div>
+                      <div className="history-item__info">
+                        <div className="history-item__title">{entry.title || 'Untitled'}</div>
+                        <div className="history-item__url">{entry.url}</div>
+                        <div className="history-item__meta">
+                          <span>{new Date(entry.lastVisitTime).toLocaleString()}</span>
+                          <span>Visited {entry.visitCount} time{entry.visitCount !== 1 ? 's' : ''}</span>
+                        </div>
+                      </div>
+                      <div className="history-item__actions">
+                        <button
+                          type="button"
+                          className="history-item__action"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setHistoryDatabase(prev => {
+                              const entries = new Map(prev.entries);
+                              entries.delete(entry.url);
+                              const updated = { ...prev, entries };
+                              saveHistoryToStorage(updated);
+                              return updated;
+                            });
+                          }}
+                          title="Remove from history"
+                        >
+                          ×
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                {historyDatabase.entries.size === 0 && (
+                  <div className="overlay-page__empty">No history yet</div>
+                )}
+              </div>
             </div>
           )}
         </div>
@@ -7847,6 +8096,152 @@ const App = () => {
             ) : (
               summaryPopup.content
             )}
+          </div>
+        </div>
+      )}
+
+      {/* FlowPass login capture prompt */}
+      {capturedLogin && (
+        <div
+          style={{
+            position: 'fixed',
+            bottom: '20px',
+            right: '20px',
+            background: 'rgba(30, 30, 30, 0.98)',
+            border: '1px solid rgba(79, 178, 118, 0.3)',
+            borderRadius: '12px',
+            padding: '16px',
+            maxWidth: '400px',
+            boxShadow: '0 8px 32px rgba(0, 0, 0, 0.4)',
+            zIndex: 10001,
+            color: 'rgba(255, 255, 255, 0.9)',
+            fontSize: '14px',
+          }}
+        >
+          <div style={{ display: 'flex', alignItems: 'flex-start', gap: '12px' }}>
+            <div style={{ fontSize: '24px', flexShrink: 0 }}>🔐</div>
+            <div style={{ flex: 1 }}>
+              <div style={{ fontWeight: '600', marginBottom: '8px', color: 'var(--color-green-200)' }}>
+                Save password for {capturedLogin.host}?
+              </div>
+              <div style={{ fontSize: '13px', color: 'rgba(255, 255, 255, 0.7)', marginBottom: '4px' }}>
+                Username: {capturedLogin.username || '(none)'}
+              </div>
+              <div style={{ fontSize: '13px', color: 'rgba(255, 255, 255, 0.7)', marginBottom: '12px' }}>
+                Password: {'•'.repeat(Math.min(capturedLogin.password.length, 20))}
+              </div>
+              <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+                <button
+                  type="button"
+                  onClick={async () => {
+                    try {
+                      // Check if vault is unlocked first
+                      const statusResult = await window.sylph?.flowpass?.getStatus();
+                      if (!statusResult?.success || statusResult.status !== 'unlocked') {
+                        alert('Please unlock FlowPass first in Settings to save passwords.');
+                        return;
+                      }
+
+                      // Get current profile - for now use default profile
+                      const profileId = 'default';
+
+                      // Prompt for master password
+                      const masterPassword = prompt('Enter your FlowPass master password to save this credential:');
+                      if (!masterPassword) {
+                        return;
+                      }
+
+                      // Save to FlowPass
+                      const result = await window.sylph?.flowpass?.saveEntry({
+                        profileId,
+                        masterPassword,
+                        entry: {
+                          id: `entry-${Date.now()}`,
+                          name: capturedLogin.host,
+                          urls: [capturedLogin.url],
+                          username: capturedLogin.username,
+                          password: capturedLogin.password,
+                          notes: 'Auto-captured login',
+                          customFields: [],
+                          createdAt: Date.now(),
+                          updatedAt: Date.now(),
+                          lastUsedAt: Date.now(),
+                          tags: [],
+                        },
+                      });
+
+                      if (result?.success) {
+                        // Clear capture buffer
+                        await window.sylph?.flowpass?.clearCaptureBuffer();
+                        setCapturedLogin(null);
+                      } else {
+                        alert('Failed to save password: ' + (result?.error || 'Unknown error'));
+                      }
+                    } catch (error) {
+                      console.error('[FlowPass] Failed to save login:', error);
+                      alert('Failed to save password. Please try again.');
+                    }
+                  }}
+                  style={{
+                    padding: '8px 16px',
+                    background: 'var(--color-green-400)',
+                    border: 'none',
+                    borderRadius: '6px',
+                    color: '#000',
+                    fontWeight: '600',
+                    cursor: 'pointer',
+                    fontSize: '13px',
+                  }}
+                >
+                  Save
+                </button>
+                <button
+                  type="button"
+                  onClick={async () => {
+                    try {
+                      await window.sylph?.flowpass?.addNeverSaveHost(capturedLogin.host);
+                      await window.sylph?.flowpass?.clearCaptureBuffer();
+                      setCapturedLogin(null);
+                    } catch (error) {
+                      console.error('[FlowPass] Failed to add to never save:', error);
+                    }
+                  }}
+                  style={{
+                    padding: '8px 16px',
+                    background: 'transparent',
+                    border: '1px solid rgba(255, 255, 255, 0.2)',
+                    borderRadius: '6px',
+                    color: 'rgba(255, 255, 255, 0.9)',
+                    cursor: 'pointer',
+                    fontSize: '13px',
+                  }}
+                >
+                  Never
+                </button>
+                <button
+                  type="button"
+                  onClick={async () => {
+                    try {
+                      await window.sylph?.flowpass?.clearCaptureBuffer();
+                      setCapturedLogin(null);
+                    } catch (error) {
+                      console.error('[FlowPass] Failed to dismiss:', error);
+                    }
+                  }}
+                  style={{
+                    padding: '8px 16px',
+                    background: 'transparent',
+                    border: '1px solid rgba(255, 255, 255, 0.2)',
+                    borderRadius: '6px',
+                    color: 'rgba(255, 255, 255, 0.9)',
+                    cursor: 'pointer',
+                    fontSize: '13px',
+                  }}
+                >
+                  Not now
+                </button>
+              </div>
+            </div>
           </div>
         </div>
       )}
