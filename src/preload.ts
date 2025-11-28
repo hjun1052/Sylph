@@ -5,6 +5,7 @@ import type {
   AutomationApprovalRequest,
   AutomationCancelRequest,
   AutomationStepResultPayload,
+  ReportNavigationRequest,
   StartAutomationRequest,
 } from './shared/aether';
 import type { PassGuardUserOverride } from './renderer/types/tab';
@@ -139,6 +140,17 @@ const api = {
       },
       reportStepResult: (payload: AutomationStepResultPayload) =>
         ipcRenderer.invoke('aether:step-result', payload) as Promise<{
+          success: boolean;
+          error?: string;
+        }>,
+      // Backward compatibility alias; prefer reportStepResult.
+      handleStepResult: (payload: AutomationStepResultPayload) =>
+        ipcRenderer.invoke('aether:step-result', payload) as Promise<{
+          success: boolean;
+          error?: string;
+        }>,
+      reportNavigation: (payload: ReportNavigationRequest) =>
+        ipcRenderer.invoke('aether:report-navigation', payload) as Promise<{
           success: boolean;
           error?: string;
         }>,

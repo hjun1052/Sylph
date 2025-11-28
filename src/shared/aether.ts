@@ -117,6 +117,11 @@ export interface AutomationApprovalRequest {
   reason?: string;
 }
 
+export interface ReportNavigationRequest {
+  runId: string;
+  url: string;
+}
+
 export interface AutomationCancelRequest {
   runId: string;
   reason?: string;

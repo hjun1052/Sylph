@@ -9,8 +9,16 @@
     "package": "electron-forge package",
     "make": "electron-forge make",
     "publish": "electron-forge publish",
-    "lint": "eslint --ext .ts,.tsx ."
+    "lint": "eslint --ext .ts,.tsx .",
+    "build": "electron-builder"
   },
+  "build": {
+    "appId": "com.ploradian.sylph",
+    "mac": {
+      "target": "dmg"
+    }
+  },
+  
   "keywords": [],
   "author": "hjun1052 <hjun7079@gmail.com>",
   "license": "MIT",
@@ -34,7 +42,8 @@
     "@typescript-eslint/parser": "^5.62.0",
     "@vercel/webpack-asset-relocator-loader": "^1.7.3",
     "css-loader": "^6.11.0",
-    "electron": "^37.2.0",
+    "electron": "^37.10.3",
+    "electron-builder": "^26.0.12",
     "eslint": "^8.57.1",
     "eslint-plugin-import": "^2.32.0",
     "fork-ts-checker-webpack-plugin": "^9.1.0",

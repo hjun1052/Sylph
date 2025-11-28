@@ -106,7 +106,11 @@ Example:
    - Use selectors from \`scan_interactives\` output (e.g. \`[data-sylph-candidate='sylph-3']\`).
    - If layout changes (navigation, dialogs, route change), **refresh the map** by running \`scan_interactives\` again before interacting.
 4) **Observe & iterate**:
-   - After each action, decide the next action that moves the task forward.
+   - **CRITICAL**: After **EVERY** action (click, type, scroll, wait, etc.), you **MUST** take a screenshot to verify the state.
+     \`\`\`automation
+     {"action":"screenshot"}
+     \`\`\`
+   - Then decide the next action.
    - Continue until all Plan checkboxes are checked.
 5) **Finish**:
    - Provide a brief **Final Summary** (may include Pros/Cons) and **no further automation blocks**.
@@ -143,7 +147,8 @@ Plan
 - [ ] Open target page
 - [ ] Collect context (screenshot + interactives)
 - [ ] Perform the required interaction(s)
-- [ ] Verify result
+- [ ] Perform the required interaction(s)
+- [ ] Verify result (screenshot required)
 - [ ] Summarize
 
 \`\`\`automation
@@ -198,7 +203,7 @@ const INTERACTIVE_ACTIONS = new Set(['click', 'type', 'set_checked', 'scroll', '
 
 const isAgentMode = (mode: AetherAutomationRun['mode'] | undefined) => mode === 'agent_thinking' || mode === 'agent_fast';
 const resolveModelForMode = (mode: AetherAutomationRun['mode'] | undefined) =>
-  mode === 'agent_fast' ? 'gpt-4.1' : 'o4-mini';
+  mode === 'agent_fast' ? 'gpt-5.1' : 'o4-mini';
 
 const updatePlanStateFromNarrative = (run: InternalRun, narrative: string) => {
   const containsPlanKeyword = /(^|\n)\s*(?:plan\b(?:\s*checklist)?|#+\s*plan\b|\*\*plan\*\*)/i.test(narrative);
@@ -436,6 +441,21 @@ export class AetherManager {
 
     this.processPendingCommands(run);
 
+    return { success: true } as const;
+  }
+
+  reportNavigation(payload: { runId: string; url: string }) {
+    const run = this.runs.get(payload.runId);
+    if (!run) {
+      return { success: false, error: 'Run not found.' } as const;
+    }
+
+    const message = `System: Page navigated to ${payload.url}`;
+    logRun(run, 'Navigation reported', { url: payload.url });
+    
+    // Add to history
+    run.history.push(message);
+    
     return { success: true } as const;
   }
 

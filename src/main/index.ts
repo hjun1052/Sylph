@@ -7,6 +7,10 @@ import {
   MenuItemConstructorOptions,
   WebContents,
   session,
+  clipboard,
+  webContents,
+  dialog,
+  shell,
 } from 'electron';
 import type { Extension as ElectronExtension } from 'electron';
 import { promises as fs } from 'fs';
@@ -15,7 +19,7 @@ import { pathToFileURL } from 'url';
 import { ElectronBlocker } from '@ghostery/adblocker-electron';
 import { CosmeticFilter, parseFilter } from '@ghostery/adblocker';
 import { ElectronChromeExtensions } from 'electron-chrome-extensions';
-import { installChromeWebStore, installExtension, updateExtensions } from 'electron-chrome-web-store';
+import { installChromeWebStore, installExtension, updateExtensions, uninstallExtension } from 'electron-chrome-web-store';
 import OpenAI from 'openai';
 import translate from 'translate-google';
 import { createAetherManager } from './aether-manager';
@@ -23,6 +27,7 @@ import type {
   AutomationApprovalRequest,
   AutomationCancelRequest,
   AutomationStepResultPayload,
+  ReportNavigationRequest,
   StartAutomationRequest,
 } from '../shared/aether';
 import { DEFAULT_ACCEPT_LANGUAGE, DEFAULT_USER_AGENT } from '../shared/network';
@@ -838,7 +843,6 @@ const setupWebviewContextMenus = () => {
             {
               label: 'Copy Link Address',
               click: () => {
-                const { clipboard } = require('electron');
                 clipboard.writeText(params.linkURL);
               },
             },
@@ -1095,6 +1099,10 @@ ipcMain.handle('aether:step-result', (_event, payload: AutomationStepResultPaylo
   return aetherManager.handleStepResult(payload);
 });
 
+ipcMain.handle('aether:report-navigation', (_event, payload: ReportNavigationRequest) => {
+  return aetherManager.reportNavigation(payload);
+});
+
 ipcMain.handle('show-tab-context-menu', (event, payload) => {
   const window = BrowserWindow.fromWebContents(event.sender);
   if (!window) return;
@@ -1137,7 +1145,6 @@ const requestTabContextMenu = (
       enabled: !!payload.url,
       click: () => {
         if (payload.url) {
-          const { clipboard } = require('electron');
           clipboard.writeText(payload.url);
         }
       },
@@ -1264,18 +1271,18 @@ ipcMain.handle('extensions:list', async () => {
 
 ipcMain.handle('extensions:add-tab', async (_event, payload: { webContentsId: number }) => {
   if (!extensions) return;
-  const webContents = require('electron').webContents.fromId(payload.webContentsId);
-  if (!webContents) return;
-  const window = BrowserWindow.fromWebContents(webContents);
+  const wc = webContents.fromId(payload.webContentsId);
+  if (!wc) return;
+  const window = BrowserWindow.fromWebContents(wc);
   if (!window) return;
-  extensions.addTab(webContents, window);
+  extensions.addTab(wc, window);
 });
 
 ipcMain.handle('extensions:select-tab', async (_event, payload: { webContentsId: number }) => {
   if (!extensions) return;
-  const webContents = require('electron').webContents.fromId(payload.webContentsId);
-  if (!webContents) return;
-  extensions.selectTab(webContents);
+  const wc = webContents.fromId(payload.webContentsId);
+  if (!wc) return;
+  extensions.selectTab(wc);
 });
 
 // Chrome Web Store IPC handlers
@@ -1301,7 +1308,6 @@ ipcMain.handle('extensions:install-from-store', async (_event, extensionId: stri
 
 ipcMain.handle('extensions:uninstall-from-store', async (_event, extensionId: string) => {
   try {
-    const { uninstallExtension } = require('electron-chrome-web-store');
     await uninstallExtension(extensionId, {
       session: session.fromPartition('persist:sylph'),
       extensionsPath: path.join(app.getPath('userData'), 'Extensions'),
@@ -1379,7 +1385,6 @@ ipcMain.handle('extensions:show-popup', async (event, extensionId: string) => {
 // Content feature IPC handlers
 ipcMain.handle('content:capture-screenshot', async (_event, payload: { webContentsId: number; format?: 'png' | 'jpeg' }) => {
   try {
-    const { webContents } = require('electron');
     const wc = webContents.fromId(payload.webContentsId);
     if (!wc) {
       return { success: false, error: 'WebContents not found' };
@@ -1399,7 +1404,6 @@ ipcMain.handle('content:capture-screenshot', async (_event, payload: { webConten
 
 ipcMain.handle('content:save-page', async (_event, payload: { webContentsId: number }) => {
   try {
-    const { webContents, dialog } = require('electron');
     const wc = webContents.fromId(payload.webContentsId);
     if (!wc) {
       return { success: false, error: 'WebContents not found' };
@@ -1423,7 +1427,6 @@ ipcMain.handle('content:save-page', async (_event, payload: { webContentsId: num
 
 ipcMain.handle('content:print', async (_event, payload: { webContentsId: number }) => {
   try {
-    const { webContents } = require('electron');
     const wc = webContents.fromId(payload.webContentsId);
     if (!wc) {
       return { success: false, error: 'WebContents not found' };
@@ -1437,7 +1440,6 @@ ipcMain.handle('content:print', async (_event, payload: { webContentsId: number 
 
 ipcMain.handle('content:toggle-fullscreen', async (_event, payload: { webContentsId: number }) => {
   try {
-    const { webContents } = require('electron');
     const wc = webContents.fromId(payload.webContentsId);
     if (!wc) {
       return { success: false, isFullscreen: false };
@@ -1456,7 +1458,6 @@ ipcMain.handle('content:toggle-fullscreen', async (_event, payload: { webContent
 
 ipcMain.handle('content:summarize-page', async (_event, payload: { webContentsId: number; url: string }) => {
   try {
-    const { webContents } = require('electron');
     const wc = webContents.fromId(payload.webContentsId);
     if (!wc) {
       return { success: false, error: 'WebContents not found' };
@@ -1499,7 +1500,6 @@ ipcMain.handle('content:summarize-page', async (_event, payload: { webContentsId
 
 ipcMain.handle('content:translate-page', async (_event, payload: { webContentsId: number; url: string; targetLang?: string }) => {
   try {
-    const { webContents } = require('electron');
     const wc = webContents.fromId(payload.webContentsId);
     if (!wc) {
       return { success: false, error: 'WebContents not found' };
@@ -1633,7 +1633,6 @@ ipcMain.handle('download:cancel', async (_event, payload: { id: string }) => {
 
 ipcMain.handle('download:open', async (_event, payload: { path: string }) => {
   try {
-    const { shell } = require('electron');
     await shell.openPath(payload.path);
     return { success: true };
   } catch (error) {
@@ -1643,7 +1642,6 @@ ipcMain.handle('download:open', async (_event, payload: { path: string }) => {
 
 ipcMain.handle('download:show-in-folder', async (_event, payload: { path: string }) => {
   try {
-    const { shell } = require('electron');
     shell.showItemInFolder(payload.path);
     return { success: true };
   } catch (error) {
@@ -1669,7 +1667,7 @@ ipcMain.handle('webview:show-context-menu', async (event, payload: {
       template.push({
         label: suggestion,
         click: () => {
-          const wc = require('electron').webContents.fromId(webContentsId);
+          const wc = webContents.fromId(webContentsId);
           if (wc) wc.replaceMisspelling(suggestion);
         }
       });
@@ -1754,7 +1752,7 @@ ipcMain.handle('webview:show-context-menu', async (event, payload: {
   }
 
   if (!params.isEditable) {
-    const wc = require('electron').webContents.fromId(webContentsId);
+    const wc = webContents.fromId(webContentsId);
     if (wc) {
       const navigation = getNavigationState(wc);
       if (navigation.canGoBack) {

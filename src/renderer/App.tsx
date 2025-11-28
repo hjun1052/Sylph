@@ -741,7 +741,7 @@ const isChromeWebStore = (url: string): boolean => {
   try {
     const parsed = new URL(url);
     return parsed.hostname === 'chromewebstore.google.com' ||
-           parsed.hostname === 'chrome.google.com';
+      parsed.hostname === 'chrome.google.com';
   } catch {
     return false;
   }
@@ -762,8 +762,8 @@ const cloneAutomationRun = (run: AetherAutomationRun): AetherAutomationRun => ({
     ...step,
     detail: step.detail
       ? {
-          command: step.detail.command ? { ...step.detail.command } : undefined,
-        }
+        command: step.detail.command ? { ...step.detail.command } : undefined,
+      }
       : undefined,
   })),
 });
@@ -1755,21 +1755,21 @@ const App = () => {
       const useChromeUA = state.active && isChromeWebStore(tab.url);
       const activeProfile = state.active
         ? {
-            userAgent: passGuardSettings.customUserAgent || (useChromeUA ? CHROME_USER_AGENT : PASS_GUARD_USER_AGENT),
-            platform: passGuardSettings.customPlatform || 'Win32',
-            vendor: passGuardSettings.customVendor || (useChromeUA ? 'Google Inc.' : ''),
-            productSub: passGuardSettings.customProductSub || (useChromeUA ? '20030107' : '20100101'),
-            appVersion: passGuardSettings.customAppVersion || (useChromeUA ? '5.0 (Windows NT 10.0; Win64; x64)' : '5.0 (Windows)'),
-            removeUserAgentData: passGuardSettings.removeUserAgentData,
-          }
+          userAgent: passGuardSettings.customUserAgent || (useChromeUA ? CHROME_USER_AGENT : PASS_GUARD_USER_AGENT),
+          platform: passGuardSettings.customPlatform || 'Win32',
+          vendor: passGuardSettings.customVendor || (useChromeUA ? 'Google Inc.' : ''),
+          productSub: passGuardSettings.customProductSub || (useChromeUA ? '20030107' : '20100101'),
+          appVersion: passGuardSettings.customAppVersion || (useChromeUA ? '5.0 (Windows NT 10.0; Win64; x64)' : '5.0 (Windows)'),
+          removeUserAgentData: passGuardSettings.removeUserAgentData,
+        }
         : {
-            userAgent: DEFAULT_USER_AGENT,
-            platform: 'MacIntel',
-            vendor: 'Google Inc.',
-            productSub: '20030107',
-            appVersion: '5.0 (Macintosh; Intel Mac OS X 10_15_7)',
-            removeUserAgentData: false,
-          };
+          userAgent: DEFAULT_USER_AGENT,
+          platform: 'MacIntel',
+          vendor: 'Google Inc.',
+          productSub: '20030107',
+          appVersion: '5.0 (Macintosh; Intel Mac OS X 10_15_7)',
+          removeUserAgentData: false,
+        };
       const languages = PASS_GUARD_LANGUAGES;
       const previous = passGuardAppliedRef.current.get(tab.id);
       const userAgentChanged = previous?.userAgent !== activeProfile.userAgent;
@@ -1817,13 +1817,13 @@ const App = () => {
         const webContentsId =
           typeof webview.getWebContentsId === 'function'
             ? (() => {
-                try {
-                  return webview.getWebContentsId();
-                } catch (error) {
-                  console.warn('PassGuard: webview not ready for webContentsId yet', error);
-                  return undefined;
-                }
-              })()
+              try {
+                return webview.getWebContentsId();
+              } catch (error) {
+                console.warn('PassGuard: webview not ready for webContentsId yet', error);
+                return undefined;
+              }
+            })()
             : undefined;
         payload.webContentsId = typeof webContentsId === 'number' ? webContentsId : null;
 
@@ -1897,21 +1897,21 @@ const App = () => {
       const state = tab.passGuard ?? createDefaultPassGuardState();
       const profile = state.active
         ? {
-            userAgent: passGuardSettings.customUserAgent || PASS_GUARD_USER_AGENT,
-            platform: passGuardSettings.customPlatform || 'Win32',
-            vendor: passGuardSettings.customVendor || '',
-            productSub: passGuardSettings.customProductSub || '20100101',
-            appVersion: passGuardSettings.customAppVersion || '5.0 (Windows)',
-            removeUserAgentData: passGuardSettings.removeUserAgentData,
-          }
+          userAgent: passGuardSettings.customUserAgent || PASS_GUARD_USER_AGENT,
+          platform: passGuardSettings.customPlatform || 'Win32',
+          vendor: passGuardSettings.customVendor || '',
+          productSub: passGuardSettings.customProductSub || '20100101',
+          appVersion: passGuardSettings.customAppVersion || '5.0 (Windows)',
+          removeUserAgentData: passGuardSettings.removeUserAgentData,
+        }
         : {
-            userAgent: DEFAULT_USER_AGENT,
-            platform: 'MacIntel',
-            vendor: 'Google Inc.',
-            productSub: '20030107',
-            appVersion: '5.0 (Macintosh; Intel Mac OS X 10_15_7)',
-            removeUserAgentData: false,
-          };
+          userAgent: DEFAULT_USER_AGENT,
+          platform: 'MacIntel',
+          vendor: 'Google Inc.',
+          productSub: '20030107',
+          appVersion: '5.0 (Macintosh; Intel Mac OS X 10_15_7)',
+          removeUserAgentData: false,
+        };
       const snapshot = passGuardAppliedRef.current.get(tab.id);
       if (
         !snapshot ||
@@ -2550,9 +2550,9 @@ const App = () => {
         const nextMessages = tab.aiContext.messages.map(message =>
           message.id === assistantMessageId
             ? {
-                ...message,
-                status: 'pending' as const,
-              }
+              ...message,
+              status: 'pending' as const,
+            }
             : message,
         );
         return {
@@ -2653,8 +2653,8 @@ const App = () => {
           ? '수동 활성화됨'
           : '수동 비활성화됨'
         : activePassGuard.active
-        ? '자동 활성화됨'
-        : '비활성화됨';
+          ? '자동 활성화됨'
+          : '비활성화됨';
     return `PassGuard ${mode}${reasonText}. 클릭하면 PassGuard 제어판을 엽니다.`;
   }, [activePassGuard]);
   const isManualOverride = activePassGuard.source === 'manual';
@@ -2701,10 +2701,10 @@ const App = () => {
       : null;
   const browserViewStyle = activeSplit.isSplit
     ? ({
-        '--primary-width': `${(ratio * 100).toFixed(2)}%`,
-        '--secondary-width': `${((1 - ratio) * 100).toFixed(2)}%`,
-        '--split-gap': '18px',
-      } as React.CSSProperties)
+      '--primary-width': `${(ratio * 100).toFixed(2)}%`,
+      '--secondary-width': `${((1 - ratio) * 100).toFixed(2)}%`,
+      '--split-gap': '18px',
+    } as React.CSSProperties)
     : undefined;
   const canSplit = tabs.length > 1;
 
@@ -3827,6 +3827,15 @@ const App = () => {
           setAddressValue(url);
         }
         updateNavigationState();
+
+        // Report navigation to Aether if automation is active
+        const currentTab = tabsByIdRef.current.get(tabId);
+        if (currentTab?.automation?.activeRunId) {
+          void window.sylph?.ai?.automation?.reportNavigation?.({
+            runId: currentTab.automation.activeRunId,
+            url,
+          });
+        }
       };
 
       const handleDidNavigateInPage = (event: DidNavigateInPageEvent) => {
@@ -3841,6 +3850,15 @@ const App = () => {
           setAddressValue(url);
         }
         updateNavigationState();
+
+        // Report navigation to Aether if automation is active
+        const currentTab = tabsByIdRef.current.get(tabId);
+        if (currentTab?.automation?.activeRunId) {
+          void window.sylph?.ai?.automation?.reportNavigation?.({
+            runId: currentTab.automation.activeRunId,
+            url,
+          });
+        }
       };
 
       const handleTitleUpdated = (event: PageTitleUpdatedEvent) => {
@@ -4062,11 +4080,11 @@ const App = () => {
               postData:
                 postBody.data
                   ? [
-                      {
-                        type: 'rawData' as const,
-                        bytes: postBody.data as Buffer,
-                      },
-                    ]
+                    {
+                      type: 'rawData' as const,
+                      bytes: postBody.data as Buffer,
+                    },
+                  ]
                   : undefined,
               extraHeaders,
             });
@@ -4791,13 +4809,13 @@ const App = () => {
       const runMode = composerModeToRunMode(desiredMode as ComposerMode);
       setAutomationBootstrapMessageId(message.id);
       try {
-      await startAutomationForMessage({
-        tabId,
-        assistantMessageId: message.id,
-        prompt,
-        selection: selection || undefined,
-        mode: runMode,
-      });
+        await startAutomationForMessage({
+          tabId,
+          assistantMessageId: message.id,
+          prompt,
+          selection: selection || undefined,
+          mode: runMode,
+        });
       } catch (error) {
         const fallback = error instanceof Error ? error.message : 'Failed to start automation.';
         updateTabById(tabId, tab => {
@@ -4805,10 +4823,10 @@ const App = () => {
           const nextMessages = tab.aiContext.messages.map(item =>
             item.id === message.id
               ? {
-                  ...item,
-                  status: 'completed' as const,
-                  content: `${item.content}\n\n⚠️ ${fallback}`,
-                }
+                ...item,
+                status: 'completed' as const,
+                content: `${item.content}\n\n⚠️ ${fallback}`,
+              }
               : item,
           );
           return {
@@ -4906,6 +4924,7 @@ const App = () => {
 
   const executeAutomationCall = useCallback(
     async (runId: string, tabId: string | null, stepId: string, command: AutomationCommand) => {
+      console.log('[Aether] executeAutomationCall started:', { runId, tabId, stepId, action: command.action });
       const reportResult = window.sylph?.ai?.automation?.reportStepResult;
       if (!reportResult) return;
 
@@ -5114,12 +5133,12 @@ const App = () => {
             typeof command.amount === 'number'
               ? command.amount
               : command.direction === 'up'
-              ? -600
-              : command.direction === 'left'
-              ? -600
-              : command.direction === 'right'
-              ? 600
-              : 600;
+                ? -600
+                : command.direction === 'left'
+                  ? -600
+                  : command.direction === 'right'
+                    ? 600
+                    : 600;
           if (command.selector || (Array.isArray(command.selectors) && command.selectors.length > 0)) {
             result = await executeScript(
               buildElementActionScript(`
@@ -5197,6 +5216,17 @@ const App = () => {
           const hasSelector = Boolean(
             command.selector || (Array.isArray(command.selectors) && command.selectors.length > 0),
           );
+
+          // Helper function to add timeout to capture
+          const captureWithTimeout = async (capturePromise: Promise<Electron.NativeImage>, timeoutMs = 10000) => {
+            return Promise.race([
+              capturePromise,
+              new Promise<never>((_, reject) =>
+                setTimeout(() => reject(new Error('Screenshot capture timed out')), timeoutMs)
+              )
+            ]);
+          };
+
           if (hasSelector || command.text || command.fallback) {
             const scriptResult = await executeScript(
               buildElementActionScript(`
@@ -5220,28 +5250,39 @@ const App = () => {
               scriptResult?.data && typeof scriptResult.data === 'object'
                 ? (scriptResult.data as { rect?: { x: number; y: number; width: number; height: number } }).rect
                 : undefined;
-            const image = await targetWebview.capturePage(
-              rectData
-                ? {
-                    x: Math.max(0, Math.floor(rectData.x)),
-                    y: Math.max(0, Math.floor(rectData.y)),
-                    width: Math.max(1, Math.floor(rectData.width)),
-                    height: Math.max(1, Math.floor(rectData.height)),
-                  }
-                : undefined,
-            );
-            screenshotDataUrl = image.toDataURL();
+
+            try {
+              const image = await captureWithTimeout(
+                targetWebview.capturePage(
+                  rectData
+                    ? {
+                      x: Math.max(0, Math.floor(rectData.x)),
+                      y: Math.max(0, Math.floor(rectData.y)),
+                      width: Math.max(1, Math.floor(rectData.width)),
+                      height: Math.max(1, Math.floor(rectData.height)),
+                    }
+                    : undefined,
+                )
+              );
+              screenshotDataUrl = image.toDataURL();
+            } catch (error) {
+              result = { success: false, error: error instanceof Error ? error.message : 'Screenshot capture failed' };
+            }
           } else {
             result = { success: true, output: 'Captured page screenshot.' };
-            const image = await targetWebview.capturePage();
-            screenshotDataUrl = image.toDataURL();
+            try {
+              const image = await captureWithTimeout(targetWebview.capturePage());
+              screenshotDataUrl = image.toDataURL();
+            } catch (error) {
+              result = { success: false, error: error instanceof Error ? error.message : 'Screenshot capture failed' };
+            }
           }
         } else if (lowerAction === 'navigate') {
           const rawUrl = typeof command.url === 'string' && command.url.trim().length > 0
             ? command.url.trim()
             : typeof command.text === 'string' && command.text.trim().length > 0
-            ? command.text.trim()
-            : undefined;
+              ? command.text.trim()
+              : undefined;
           if (!rawUrl) {
             await reportResult({
               runId,
@@ -5276,10 +5317,10 @@ const App = () => {
           const query = typeof command.query === 'string' && command.query.trim().length > 0
             ? command.query.trim()
             : typeof command.text === 'string' && command.text.trim().length > 0
-            ? command.text.trim()
-            : typeof command.value === 'string' && command.value.trim().length > 0
-            ? command.value.trim()
-            : undefined;
+              ? command.text.trim()
+              : typeof command.value === 'string' && command.value.trim().length > 0
+                ? command.value.trim()
+                : undefined;
 
           if (!query) {
             await reportResult({
@@ -5292,7 +5333,7 @@ const App = () => {
             return;
           }
 
-          const searchUrl = `https://api.duckduckgo.com/?q=${encodeURIComponent(query)}&format=json&no_redirect=1&no_html=1`; 
+          const searchUrl = `https://api.duckduckgo.com/?q=${encodeURIComponent(query)}&format=json&no_redirect=1&no_html=1`;
           let payload: unknown = null;
           try {
             const response = await fetch(searchUrl, {
@@ -5357,27 +5398,11 @@ const App = () => {
           const scanScript = `(() => {
   try {
   const MAX_ITEMS = 80;
+  const MAX_SCANNED_ITEMS = 3000;
   const attr = 'data-sylph-candidate';
   Array.from(document.querySelectorAll('[' + attr + ']')).forEach(el => {
     if (el instanceof HTMLElement) el.removeAttribute(attr);
   });
-
-  const isVisible = element => {
-    if (!(element instanceof HTMLElement)) return false;
-    const style = window.getComputedStyle(element);
-    if (style.visibility === 'hidden' || style.display === 'none') return false;
-    const opacity = Number.parseFloat(style.opacity);
-    if (!Number.isFinite(opacity) ? false : opacity === 0) return false;
-    let current = element;
-    while (current) {
-      if (current instanceof HTMLElement && current.hidden) return false;
-      current = current.parentElement;
-    }
-    const rect = element.getBoundingClientRect();
-    if (!Number.isFinite(rect.width) || !Number.isFinite(rect.height)) return false;
-    if (rect.width < 4 || rect.height < 4) return false;
-    return rect.width * rect.height > 16;
-  };
 
   const selectorList = [
     'a',
@@ -5427,13 +5452,30 @@ const App = () => {
   };
 
   const filtered = [];
+  let scanned = 0;
   for (const node of raw) {
+    if (scanned >= MAX_SCANNED_ITEMS) break;
+    scanned++;
+    
     if (!(node instanceof HTMLElement)) continue;
     if (filtered.length >= MAX_ITEMS) break;
     if (!node.isConnected) continue;
-    if (!isVisible(node)) continue;
+    
+    // Use native checkVisibility if available (Electron 24+ / Chrome 105+)
+    if (typeof node.checkVisibility === 'function') {
+      if (!node.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true })) continue;
+    } else {
+      // Fallback for older environments (though Sylph should be on new Electron)
+      if (node.offsetParent === null) continue; 
+    }
+
     const record = describe(node);
     if (!record) continue;
+    
+    // Double check size constraints from record
+    if (record.rect.width < 4 || record.rect.height < 4) continue;
+    if (record.rect.width * record.rect.height <= 16) continue;
+
     const id = 'sylph-' + (filtered.length + 1);
     try {
       node.dataset.sylphCandidate = id;
@@ -5456,7 +5498,7 @@ const App = () => {
     return { success: true, output: 'No interactive elements found.' };
   }
   const lines = filtered.map(item => item.index + '. ' + item.tag + ' ' + item.label + ' -> ' + item.selector);
-  return { success: true, output: lines.join('\n'), data: filtered };
+  return { success: true, output: lines.join('\\n'), data: filtered };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     console.error('[Sylph scan_interactives] script error:', message);
@@ -5552,13 +5594,13 @@ const App = () => {
 
           result = await targetWebview.executeJavaScript(overlayScript, true);
         } else if (lowerAction === 'grid_click') {
-      const runMode = automationRunModeRef.current.get(runId) ?? 'auto';
-      if (!['auto', 'agent_thinking', 'agent_fast'].includes(runMode)) {
-        await reportResult({
-          runId,
-          stepId,
-          success: false,
-          output: '',
+          const runMode = automationRunModeRef.current.get(runId) ?? 'auto';
+          if (!['auto', 'agent_thinking', 'agent_fast'].includes(runMode)) {
+            await reportResult({
+              runId,
+              stepId,
+              success: false,
+              output: '',
               error: 'Run mode does not support clicking grid cells.',
             });
             return;
@@ -5770,6 +5812,7 @@ const App = () => {
           break;
         }
         case 'step-execute': {
+          console.log('[Aether] Received step-execute event:', event.runId, event.step.id, event.command);
           void (async () => {
             await executeAutomationCall(event.runId, event.tabId, event.step.id, event.command);
           })();
@@ -6994,8 +7037,8 @@ const App = () => {
                     <div key={download.id} className="download-item">
                       <div className="download-item__icon">
                         {download.state === 'progressing' ? '⏬' :
-                         download.state === 'completed' ? '✓' :
-                         download.state === 'cancelled' ? '✗' : '⚠'}
+                          download.state === 'completed' ? '✓' :
+                            download.state === 'cancelled' ? '✗' : '⚠'}
                       </div>
                       <div className="download-item__info">
                         <div className="download-item__filename">{download.filename}</div>
@@ -7258,9 +7301,8 @@ const App = () => {
                   return (
                     <div
                       key={message.id}
-                      className={`ai-message ai-message--${message.role}${
-                        message.status === 'error' ? ' is-error' : ''
-                      }`}
+                      className={`ai-message ai-message--${message.role}${message.status === 'error' ? ' is-error' : ''
+                        }`}
                     >
                       {messagePending && !message.content ? (
                         <div className="ai-message__content">Thinking…</div>
@@ -7620,8 +7662,8 @@ const App = () => {
                       ? 'Manually On'
                       : 'Manually Off'
                     : activePassGuard.active
-                    ? 'Automatically On'
-                    : 'Automatically Off'}
+                      ? 'Automatically On'
+                      : 'Automatically Off'}
                 </span>
               </div>
             </div>

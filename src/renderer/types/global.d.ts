@@ -75,6 +75,10 @@ declare global {
             success: boolean;
             error?: string;
           }>;
+          reportNavigation: (payload: ReportNavigationRequest) => Promise<{
+            success: boolean;
+            error?: string;
+          }>;
         };
       };
       passGuard?: {
@@ -326,6 +330,7 @@ import type {
   AutomationApprovalRequest,
   AutomationCancelRequest,
   AutomationStepResultPayload,
+  ReportNavigationRequest,
   StartAutomationRequest,
 } from '../../shared/aether';
 import type { PassGuardUserOverride } from './tab';
